@@ -1,33 +1,47 @@
-from flask import Flask, Response, jsonify
+from flask import Flask, Response
 import cv2
+import threading
+import subprocess
+import re
+import os
 
 app = Flask(__name__)
-
-# ✅ Try to open the USB webcam
-camera = cv2.VideoCapture(0)  # use 1 if you have multiple cameras
+camera = cv2.VideoCapture(0)  # change index if needed
 
 def generate_frames():
     while True:
         success, frame = camera.read()
         if not success:
-            print("⚠️ No camera feed detected.")
             break
         else:
-            # Encode frame to JPEG for streaming
-            ret, buffer = cv2.imencode('.jpg', frame)
-            frame = buffer.tobytes()
+            _, buffer = cv2.imencode('.jpg', frame)
+            frame_bytes = buffer.tobytes()
             yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 @app.route('/video_feed')
 def video_feed():
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@app.route('/status')
-def status():
-    # Simple endpoint for the laptop to check if Pi is online
-    return jsonify({"status": "ok", "message": "Raspberry Pi camera is running"})
+def start_cloudflare():
+    print("🌩️ Starting Cloudflare Tunnel...")
+    cmd = ["cloudflared", "tunnel", "--url", "http://localhost:5000"]
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    for line in process.stdout:
+        print(line.strip())
+        match = re.search(r"https:\/\/[^\s]+trycloudflare\.com", line)
+        if match:
+            domain = match.group(0)
+            print(f"\n🌍 Raspberry Pi Cloudflare URL: {domain}\n")
+            with open("cloudflare_url.txt", "w") as f:
+                f.write(domain)
+            break
+
+threading.Thread(target=start_cloudflare, daemon=True).start()
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+    from waitress import serve
+    print("✅ Starting Raspberry Pi Camera Server on http://localhost:5000")
+    serve(app, host='0.0.0.0', port=5000)

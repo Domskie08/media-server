@@ -4,7 +4,14 @@ import fs from "fs";
 
 const app = express();
 const PORT = 3000;
-const RPI_URL = "http://raspberrypi.local:5000/video_feed";
+let RPI_URL = "http://raspberrypi.local:5000/video_feed"; // default value
+
+if (fs.existsSync("cloudflare_url.txt")) {
+  const raspiDomain = fs.readFileSync("cloudflare_url.txt", "utf8").trim();
+  if (raspiDomain.startsWith("https://")) {
+    RPI_URL = `${raspiDomain}/video_feed`;
+  }
+}
 
 app.get("/", (req, res) => {
   res.send(`
