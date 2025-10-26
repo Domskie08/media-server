@@ -1,36 +1,52 @@
+import http from "http";
+import https from "https";
 import express from "express";
 import { spawn } from "child_process";
 import fs from "fs";
-import path from "path";
-import fetch from "node-fetch";
 
 const app = express();
 const PORT = 3000;
 
+// --- STEP 1: Auto-detect Raspberry Pi IP ---
 let RPI_FEED_URL = "";
+const raspiDomain = "http://raspberrypi.local:5000";
 
-async function detectPi() {
-  console.log("🔍 Searching for Raspberry Pi...");
+function detectPi() {
+  console.log("🔍 Checking Raspberry Pi...");
+  const client = raspiDomain.startsWith("https") ? https : http;
 
-  try {
-    // Try local hostname first
-    const res = await fetch("http://raspberrypi.local:5000/pi_info.txt", { timeout: 3000 });
-    if (!res.ok) throw new Error("Response not OK");
-    const text = await res.text();
-    RPI_FEED_URL = text.trim();
-    console.log(`✅ Raspberry Pi found: ${RPI_FEED_URL}`);
-  } catch (err) {
-    console.log("❌ No connection to Raspberry Pi.");
-    RPI_FEED_URL = "";
-  }
+  client
+    .get(`${raspiDomain}/pi_info.txt`, res => {
+      let data = "";
+      res.on("data", chunk => (data += chunk));
+      res.on("end", () => {
+        RPI_FEED_URL = data.trim();
+        console.log(`✅ Raspberry Pi URL detected: ${RPI_FEED_URL}`);
+      });
+    })
+    .on("error", err => {
+      console.log("⚠️ No connection to Raspberry Pi");
+      RPI_FEED_URL = "";
+    });
 }
 
+// --- STEP 2: Serve frontend ---
+app.get("/", (req, res) => {
+  if (!RPI_FEED_URL) return res.send("<h2>No connection to Raspberry Pi</h2>");
+  res.send(`
+    <html><body style="background:black; margin:0; display:flex; justify-content:center; align-items:center; height:100vh;">
+      <img src="${RPI_FEED_URL}/video_feed" style="width:90%; border-radius:10px;"/>
+    </body></html>
+  `);
+});
+
+// --- STEP 3: Start Cloudflare tunnel automatically ---
 function startCloudflare() {
   console.log("🌩️ Starting Cloudflare Tunnel...");
   const cfPath = `"C:\\Program Files\\Cloudflared\\cloudflared.exe"`;
   const tunnel = spawn(cfPath, ["tunnel", "--url", `http://localhost:${PORT}`], { shell: true });
 
-  const handleOutput = (data) => {
+  const handleOutput = data => {
     const text = data.toString();
     const match = text.match(/https:\/\/[^\s]+trycloudflare\.com/);
     if (match) {
@@ -42,17 +58,15 @@ function startCloudflare() {
 
   tunnel.stdout.on("data", handleOutput);
   tunnel.stderr.on("data", handleOutput);
-  tunnel.on("exit", (code) => console.log(`⚠️ Cloudflared exited with code ${code}`));
+
+  tunnel.on("exit", code => {
+    console.log(`⚠️ Cloudflared exited with code ${code}`);
+  });
 }
 
-app.get("/", (req, res) => {
-  if (!RPI_FEED_URL) return res.send("<h1 style='color:red'>❌ No connection to Raspberry Pi</h1>");
-  res.send(`<h1>🎥 Raspberry Pi Live Feed</h1>
-            <img src="${RPI_FEED_URL}/video_feed" style="width:100%;max-width:640px;">`);
-});
-
-app.listen(PORT, async () => {
+// --- Start server ---
+app.listen(PORT, () => {
   console.log(`✅ media.js server running on http://localhost:${PORT}`);
-  await detectPi();
+  detectPi();
   startCloudflare();
 });
