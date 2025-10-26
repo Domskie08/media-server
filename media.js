@@ -1,42 +1,38 @@
 import express from "express";
 import { spawn } from "child_process";
 import fs from "fs";
+import path from "path";
+import fetch from "node-fetch";
 
 const app = express();
 const PORT = 3000;
-let RPI_URL = "http://raspberrypi.local:5000/video_feed"; // default value
 
-if (fs.existsSync("cloudflare_url.txt")) {
-  const raspiDomain = fs.readFileSync("cloudflare_url.txt", "utf8").trim();
-  if (raspiDomain.startsWith("https://")) {
-    RPI_URL = `${raspiDomain}/video_feed`;
+let RPI_FEED_URL = "";
+
+async function detectPi() {
+  console.log("🔍 Searching for Raspberry Pi...");
+
+  try {
+    // Try local hostname first
+    const res = await fetch("http://raspberrypi.local:5000/pi_info.txt", { timeout: 3000 });
+    if (!res.ok) throw new Error("Response not OK");
+    const text = await res.text();
+    RPI_FEED_URL = text.trim();
+    console.log(`✅ Raspberry Pi found: ${RPI_FEED_URL}`);
+  } catch (err) {
+    console.log("❌ No connection to Raspberry Pi.");
+    RPI_FEED_URL = "";
   }
 }
 
-app.get("/", (req, res) => {
-  res.send(`
-    <h1>✅ Media Server Running</h1>
-    <p>📡 Watching feed from: ${RPI_URL}</p>
-  `);
-});
-
-app.listen(PORT, () => {
-  console.log(`✅ media.js server running on http://localhost:${PORT}`);
-  console.log(`📡 Watching feed from: ${RPI_URL}`);
-  startCloudflare();
-});
-
 function startCloudflare() {
   console.log("🌩️ Starting Cloudflare Tunnel...");
-
   const cfPath = `"C:\\Program Files\\Cloudflared\\cloudflared.exe"`;
   const tunnel = spawn(cfPath, ["tunnel", "--url", `http://localhost:${PORT}`], { shell: true });
 
-  // ✅ Common function to detect and show URL
   const handleOutput = (data) => {
     const text = data.toString();
     const match = text.match(/https:\/\/[^\s]+trycloudflare\.com/);
-
     if (match) {
       const domain = match[0].trim();
       console.log(`\n🌍 Your Cloudflare Tunnel URL: \x1b[36m${domain}\x1b[0m\n`);
@@ -44,11 +40,19 @@ function startCloudflare() {
     }
   };
 
-  // 🔍 Listen to both output channels
   tunnel.stdout.on("data", handleOutput);
   tunnel.stderr.on("data", handleOutput);
-
-  tunnel.on("exit", (code) => {
-    console.log(`⚠️ Cloudflared exited with code ${code}`);
-  });
+  tunnel.on("exit", (code) => console.log(`⚠️ Cloudflared exited with code ${code}`));
 }
+
+app.get("/", (req, res) => {
+  if (!RPI_FEED_URL) return res.send("<h1 style='color:red'>❌ No connection to Raspberry Pi</h1>");
+  res.send(`<h1>🎥 Raspberry Pi Live Feed</h1>
+            <img src="${RPI_FEED_URL}/video_feed" style="width:100%;max-width:640px;">`);
+});
+
+app.listen(PORT, async () => {
+  console.log(`✅ media.js server running on http://localhost:${PORT}`);
+  await detectPi();
+  startCloudflare();
+});
