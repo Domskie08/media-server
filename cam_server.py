@@ -4,7 +4,7 @@ import cv2
 app = Flask(__name__)
 
 # ✅ Try to open the USB webcam
-camera = cv2.VideoCapture(1)  # use 1 if you have multiple cameras
+camera = cv2.VideoCapture(2)  # use 1 if you have multiple cameras
 
 def generate_frames():
     while True:
