@@ -1,72 +1,44 @@
-import http from "http";
-import https from "https";
 import express from "express";
-import { spawn } from "child_process";
 import fs from "fs";
 
 const app = express();
 const PORT = 3000;
 
-// --- STEP 1: Auto-detect Raspberry Pi IP ---
-let RPI_FEED_URL = "";
-const raspiDomain = "http://raspberrypi.local:5000";
+app.use(express.json());
 
-function detectPi() {
-  console.log("🔍 Checking Raspberry Pi...");
-  const client = raspiDomain.startsWith("https") ? https : http;
+let RPI_FEED_URL = null;
 
-  client
-    .get(`${raspiDomain}/pi_info.txt`, res => {
-      let data = "";
-      res.on("data", chunk => (data += chunk));
-      res.on("end", () => {
-        RPI_FEED_URL = data.trim();
-        console.log(`✅ Raspberry Pi URL detected: ${RPI_FEED_URL}`);
-      });
-    })
-    .on("error", err => {
-      console.log("⚠️ No connection to Raspberry Pi");
-      RPI_FEED_URL = "";
-    });
-}
+// ✅ Auto-update from Raspberry Pi
+app.post("/update-domain", (req, res) => {
+  const { url } = req.body;
+  if (url) {
+    RPI_FEED_URL = `${url}/video_feed`;
+    fs.writeFileSync("rpi_domain.txt", RPI_FEED_URL);
+    console.log(`🔁 Updated Raspberry Pi domain: ${RPI_FEED_URL}`);
+    res.sendStatus(200);
+  } else {
+    res.sendStatus(400);
+  }
+});
 
-// --- STEP 2: Serve frontend ---
 app.get("/", (req, res) => {
-  if (!RPI_FEED_URL) return res.send("<h2>No connection to Raspberry Pi</h2>");
+  if (!RPI_FEED_URL) {
+    RPI_FEED_URL = fs.existsSync("rpi_domain.txt")
+      ? fs.readFileSync("rpi_domain.txt", "utf-8")
+      : "No connection to Raspberry Pi";
+  }
+
   res.send(`
-    <html><body style="background:black; margin:0; display:flex; justify-content:center; align-items:center; height:100vh;">
-      <img src="${RPI_FEED_URL}/video_feed" style="width:90%; border-radius:10px;"/>
-    </body></html>
+    <html>
+      <body style="background:black;display:flex;align-items:center;justify-content:center;height:100vh;">
+        ${RPI_FEED_URL.includes("http")
+          ? `<img src="${RPI_FEED_URL}" style="width:100%;height:auto;">`
+          : `<h2 style="color:white;">No connection to Raspberry Pi</h2>`}
+      </body>
+    </html>
   `);
 });
 
-// --- STEP 3: Start Cloudflare tunnel automatically ---
-function startCloudflare() {
-  console.log("🌩️ Starting Cloudflare Tunnel...");
-  const cfPath = `"C:\\Program Files\\Cloudflared\\cloudflared.exe"`;
-  const tunnel = spawn(cfPath, ["tunnel", "--url", `http://localhost:${PORT}`], { shell: true });
-
-  const handleOutput = data => {
-    const text = data.toString();
-    const match = text.match(/https:\/\/[^\s]+trycloudflare\.com/);
-    if (match) {
-      const domain = match[0].trim();
-      console.log(`\n🌍 Your Cloudflare Tunnel URL: \x1b[36m${domain}\x1b[0m\n`);
-      fs.writeFileSync("cloudflare_url.txt", domain);
-    }
-  };
-
-  tunnel.stdout.on("data", handleOutput);
-  tunnel.stderr.on("data", handleOutput);
-
-  tunnel.on("exit", code => {
-    console.log(`⚠️ Cloudflared exited with code ${code}`);
-  });
-}
-
-// --- Start server ---
 app.listen(PORT, () => {
   console.log(`✅ media.js server running on http://localhost:${PORT}`);
-  detectPi();
-  startCloudflare();
 });

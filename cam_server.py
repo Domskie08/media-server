@@ -1,29 +1,28 @@
 from flask import Flask, Response, jsonify
-import cv2, socket
+import cv2, subprocess, re, requests, socket, time, threading
 
 app = Flask(__name__)
-camera = cv2.VideoCapture(0)
 
-def get_pi_info():
-    """Return hostname and real LAN IP"""
-    hostname = socket.gethostname()
-    try:
-        # Create a dummy socket to get LAN IP instead of 127.x.x.x
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-    except Exception:
-        ip = "127.0.0.1"
-    return hostname, ip
+# 🧠 Replace this list with your actual laptop hostname + any fallback IPs
+LAPTOP_HOSTS = [
+    "desktop-r98pm6a.local",   # hostname
+    "192.168.100.15",          # optional fallback IP
+]
+
+PORT = 5000
+CLOUDFLARED_PATH = "/usr/local/bin/cloudflared"  # usually correct on Raspberry Pi
+
+# Try to open the USB webcam
+camera = cv2.VideoCapture(0)
 
 def generate_frames():
     while True:
         success, frame = camera.read()
         if not success:
             print("⚠️ No camera feed detected.")
-            break
-        ret, buffer = cv2.imencode('.jpg', frame)
+            time.sleep(1)
+            continue
+        _, buffer = cv2.imencode('.jpg', frame)
         frame = buffer.tobytes()
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
@@ -33,11 +32,50 @@ def video_feed():
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@app.route('/pi_info.txt')
-def pi_info():
-    hostname, ip = get_pi_info()
-    return f"http://{ip}:5000", 200, {'Content-Type': 'text/plain'}
+@app.route('/status')
+def status():
+    return jsonify({"status": "ok", "message": "Raspberry Pi camera is running"})
 
-if __name__ == '__main__':
-    print("🚀 Raspberry Pi Camera Server starting…")
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+# -------------------------------------------------------------------
+# 🌩️ CLOUD FLARE AUTO START + SYNC TO LAPTOP
+# -------------------------------------------------------------------
+def start_cloudflare():
+    print("🌩️ Starting Cloudflare Tunnel...")
+    try:
+        process = subprocess.Popen(
+            [CLOUDFLARED_PATH, "tunnel", "--url", f"http://localhost:{PORT}"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+
+        for line in process.stdout:
+            print(line.strip())
+            match = re.search(r"https://[^\s]+trycloudflare\.com", line)
+            if match:
+                domain = match.group(0).strip()
+                print(f"\n🌍 Cloudflare URL: {domain}\n")
+                send_domain_to_laptop(domain)
+    except Exception as e:
+        print(f"⚠️ Error running Cloudflare: {e}")
+
+def send_domain_to_laptop(domain):
+    for host in LAPTOP_HOSTS:
+        try:
+            url = f"http://{host}:3000/update-domain"
+            print(f"📡 Sending Cloudflare URL to {url}")
+            requests.post(url, json={"url": domain}, timeout=5)
+            print(f"✅ Sent successfully to {host}")
+            return
+        except Exception as e:
+            print(f"⚠️ Failed to send to {host}: {e}")
+    print("❌ Could not reach any laptop host.")
+
+# -------------------------------------------------------------------
+# 🧠 STARTUP SEQUENCE
+# -------------------------------------------------------------------
+if __name__ == "__main__":
+    # Run Cloudflare in a separate thread so it doesn’t block Flask
+    threading.Thread(target=start_cloudflare, daemon=True).start()
+
+    print(f"✅ Starting camera server on http://{socket.gethostname()}.local:{PORT}")
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=PORT)
