@@ -45,3 +45,6 @@ if __name__ == '__main__':
     from waitress import serve
     print("✅ Starting Raspberry Pi Camera Server on http://localhost:5000")
     serve(app, host='0.0.0.0', port=5000)
+    
+#curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb -o cloudflared.deb
+#sudo apt install ./cloudflared.deb -y
