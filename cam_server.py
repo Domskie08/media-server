@@ -44,7 +44,6 @@ def start_cloudflare():
     try:
         process = subprocess.Popen(
             [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{PORT}"],
-            cwd="/home/pi",  # ensure not inside restricted dirs
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
 
@@ -57,7 +56,6 @@ def start_cloudflare():
                 send_domain_to_laptop(domain)
     except Exception as e:
         print(f"⚠️ Error running Cloudflare: {e}")
-
 
 def send_domain_to_laptop(domain):
     for host in LAPTOP_HOSTS:
