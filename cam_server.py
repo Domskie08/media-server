@@ -1,6 +1,6 @@
 from flask import Flask, Response, jsonify
 import cv2, subprocess, re, requests, socket, time, threading
-
+import os
 app = Flask(__name__)
 
 # 🧠 Replace this list with your actual laptop hostname + any fallback IPs
@@ -44,6 +44,7 @@ def start_cloudflare():
     try:
         process = subprocess.Popen(
             [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{PORT}"],
+            cwd=os.path.expanduser("~"),  # ✅ auto-detect home directory
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
 
