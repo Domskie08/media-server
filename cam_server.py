@@ -15,7 +15,7 @@ PORT = 5000
 CLOUDFLARED_PATH = "/usr/local/bin/cloudflared"
 NGROK_PATH = "/usr/local/bin/ngrok"
 
-# 🎥 Open webcam (H.264 hardware-accelerated)
+# Open webcam (H.264)
 camera = cv2.VideoCapture(0, cv2.CAP_V4L2)
 camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"H264"))
 camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -23,42 +23,30 @@ camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 camera.set(cv2.CAP_PROP_FPS, 30)
 
 def generate_frames():
-    """Stream frames using H.264 compression."""
     while True:
         success, frame = camera.read()
         if not success:
             print("⚠️ No camera feed detected.")
             time.sleep(1)
             continue
-
-        # encode as JPEG (client compatible)
-        ret, buffer = cv2.imencode('.jpg', frame)
-        if not ret:
-            continue
-
+        _, buffer = cv2.imencode('.jpg', frame)
         frame_bytes = buffer.tobytes()
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-
 @app.route('/video_feed')
 def video_feed():
-    """MJPEG video stream endpoint."""
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
-
 
 @app.route('/status')
 def status():
     return jsonify({"status": "ok", "message": "Raspberry Pi camera is running"})
 
-
-# -------------------------------------------------------------------
-# 🌩️ AUTO TUNNEL SYSTEM (Ngrok or Cloudflare)
-# -------------------------------------------------------------------
-
+# -------------------------------------------------------------
+# Auto-detect LAN IP
+# -------------------------------------------------------------
 def get_local_ip():
-    """Detect the current LAN IP."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
@@ -69,23 +57,23 @@ def get_local_ip():
         s.close()
     return ip
 
-
+# -------------------------------------------------------------
+# Tunnel selection
+# -------------------------------------------------------------
 def start_tunnel():
-    """Auto-select tunnel type."""
     ip = get_local_ip()
     print(f"🌐 Detected IP: {ip}")
 
     if ip.startswith("172."):
-        print("🚀 Using NGROK tunnel (detected 172.* network)")
-        start_ngrok()
+        print("🚀 Using NGROK tunnel (corporate LAN)")
+        start_ngrok(ip)
     else:
-        print("🌩️ Using CLOUDFLARE tunnel (default)")
+        print("🌩️ Using CLOUDFLARE tunnel (normal network)")
         start_cloudflare()
 
-
-def start_ngrok():
-    """Start Ngrok tunnel."""
+def start_ngrok(local_ip):
     try:
+        # Start Ngrok HTTP tunnel
         process = subprocess.Popen(
             [NGROK_PATH, "http", str(PORT)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
@@ -93,19 +81,16 @@ def start_ngrok():
         for line in process.stdout:
             line = line.strip()
             print(line)
-            match = re.search(r"https://[a-z0-9\-]+\.ngrok\-free\.app", line)
+            match = re.search(r"https://[a-z0-9\-]+\.ngrok-free\.app", line)
             if match:
                 domain = match.group(0)
                 print(f"\n🌍 Ngrok URL: {domain}\n")
-                send_domain_to_laptop(domain)
+                send_domain_to_laptop(domain, internal=False)
                 break
     except FileNotFoundError:
-        print("❌ Ngrok not found. Install it using:")
-        print("   sudo apt install ngrok -y")
-
+        print("❌ Ngrok not found at /usr/local/bin/ngrok.")
 
 def start_cloudflare():
-    """Start Cloudflare tunnel."""
     try:
         process = subprocess.Popen(
             [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{PORT}"],
@@ -118,19 +103,18 @@ def start_cloudflare():
             if match:
                 domain = match.group(0)
                 print(f"\n🌍 Cloudflare URL: {domain}\n")
-                send_domain_to_laptop(domain)
+                send_domain_to_laptop(domain, internal=False)
                 break
     except FileNotFoundError:
-        print("❌ Cloudflared not found. Install it using:")
-        print("   sudo apt install cloudflared -y")
+        print("❌ cloudflared not found at /usr/local/bin/cloudflared.")
 
-
-def send_domain_to_laptop(domain):
-    """Send the generated domain to Node.js server."""
+def send_domain_to_laptop(domain, internal=True):
+    """Send the URL to Node.js media server; switch to http for LAN."""
     for host in LAPTOP_HOSTS:
         try:
-            url = f"http://{host}:3000/update-domain"
-            print(f"📡 Sending domain to {url}")
+            url_scheme = "http" if internal else "https"
+            url = f"{url_scheme}://{host}:3000/update-domain"
+            print(f"📡 Sending URL to {url}")
             requests.post(url, json={"url": domain}, timeout=5)
             print(f"✅ Sent successfully to {host}")
             return
@@ -138,13 +122,12 @@ def send_domain_to_laptop(domain):
             print(f"⚠️ Failed to send to {host}: {e}")
     print("❌ Could not reach any laptop host.")
 
-
-# -------------------------------------------------------------------
-# 🚀 STARTUP SEQUENCE
-# -------------------------------------------------------------------
+# -------------------------------------------------------------
+# Startup
+# -------------------------------------------------------------
 if __name__ == "__main__":
     threading.Thread(target=start_tunnel, daemon=True).start()
     hostname = socket.gethostname()
-    print(f"✅ Starting H.264 camera server on http://{hostname}.local:{PORT}")
+    print(f"✅ Starting camera server on http://{hostname}.local:{PORT}")
     from waitress import serve
     serve(app, host="0.0.0.0", port=PORT)
