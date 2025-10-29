@@ -85,22 +85,29 @@ def start_tunnel():
         print("🌩️ Using Cloudflare tunnel")
         start_cloudflare(ip)
 
-def start_ngrok(ip):
+def start_ngrok():
+    """Start Ngrok tunnel and forward domain to laptop."""
     try:
         process = subprocess.Popen(
-            [NGROK_PATH, "http", str(PORT)],
+            [NGROK_PATH, "http", str(PORT), "--log", "stdout"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
+
         for line in process.stdout:
-            print(line.strip())
-            match = re.search(r"https://[a-z0-9\-]+\.ngrok\-free\.app", line)
+            line = line.strip()
+            print(line)  # Shows Ngrok logs in your terminal
+
+            # Look for the public HTTPS URL
+            match = re.search(r"https://[0-9a-z\-]+\.ngrok\.app", line)
             if match:
                 domain = match.group(0)
-                print(f"🌍 Ngrok URL: {domain}")
+                print(f"\n🌍 Ngrok URL detected: {domain}\n")
                 send_domain_to_laptop(domain)
-                break
+                break  # stop reading once URL is found
+
     except FileNotFoundError:
-        print("❌ Ngrok not found!")
+        print(f"❌ Ngrok not found at {NGROK_PATH}. Make sure it is installed and executable.")
+
 
 def start_cloudflare(ip):
     try:
