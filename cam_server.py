@@ -8,7 +8,7 @@ LAPTOP_HOSTS = [
     "desktop-r98pm6a.local",  # hostname
     "192.168.100.15",         # fallback IP
     "10.191.254.91",
-    "172.27.44.17"
+    "172.27.44.73"
 ]
 
 PORT = 5000
