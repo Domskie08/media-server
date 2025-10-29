@@ -5,10 +5,10 @@ app = Flask(__name__)
 
 # 🧠 List of laptop IPs/hostnames where media.js runs
 LAPTOP_HOSTS = [
+    "172.27.44.73",
     "desktop-r98pm6a.local",
     "192.168.100.15",
-    "10.191.254.91",
-    "172.27.44.17"
+    "10.191.254.91"
 ]
 
 PORT = 5000
