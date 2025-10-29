@@ -43,6 +43,52 @@ def status():
 # -------------------------------------------------------------------
 def start_cloudflare():
     print("🌩️ Starting Cloudflare Tunnel...")
+
+    def run_cloudflare(use_transport=False):
+        args = [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate"]
+        if use_transport:
+            # Force Cloudflare to use HTTPS only (skip QUIC)
+            args += ["--transport", "http2"]
+        else:
+            # Prefer HTTP/2 but may attempt QUIC first
+            args += ["--protocol", "http2"]
+        args += ["--url", f"http://localhost:{PORT}"]
+
+        home_dir = os.path.expanduser("~")
+        return subprocess.Popen(
+            args,
+            cwd=home_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+
+    process = run_cloudflare(use_transport=False)
+    quic_fail_count = 0
+
+    for line in process.stdout:
+        line = line.strip()
+        print(line)
+
+        # 🕵️ Detect QUIC timeout errors
+        if "7844" in line and "timeout" in line.lower():
+            quic_fail_count += 1
+            if quic_fail_count >= 3:
+                print("\n⚠️ Detected repeated QUIC failures — restarting tunnel with --transport http2...\n")
+                process.terminate()
+                time.sleep(3)
+                process = run_cloudflare(use_transport=True)
+                quic_fail_count = 0
+                continue
+
+        # 🌍 Extract public Cloudflare domain
+        match = re.search(r"https://[^\s]+trycloudflare\.com", line)
+        if match:
+            domain = match.group(0).strip()
+            print(f"\n🌍 Cloudflare URL: {domain}\n")
+            send_domain_to_laptop(domain)
+
+    print("🌩️ Starting Cloudflare Tunnel...")
     try:
         home_dir = os.path.expanduser("~")  # ✅ safely resolves /home/pi or your user folder
         process = subprocess.Popen(
