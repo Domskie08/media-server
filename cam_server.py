@@ -1,33 +1,34 @@
 from flask import Flask, Response, jsonify
-import cv2, subprocess, re, requests, socket, time, threading, os, shutil
+import cv2, subprocess, re, requests, socket, time, threading, os
 
 app = Flask(__name__)
 
-# 🧠 Laptop hostnames/IPs (where your media.js server runs)
+# 🧠 Your laptop hostnames or IPs (where media.js runs)
 LAPTOP_HOSTS = [
-    "desktop-r98pm6a.local",
-    "192.168.100.15",
+    "desktop-r98pm6a.local",  # hostname
+    "192.168.100.15",         # fallback IP
     "10.191.254.91",
     "172.27.44.17"
 ]
 
 PORT = 5000
 CLOUDFLARED_PATH = "/usr/local/bin/cloudflared"
-NGROK_PATH = "/usr/local/bin/ngrok"  # Optional fallback if installed
+NGROK_PATH = "/usr/local/bin/ngrok"
 
-# 🎥 Initialize camera
+# 🎥 Webcam stream setup
 camera = cv2.VideoCapture(0)
 
 def generate_frames():
     while True:
         success, frame = camera.read()
         if not success:
-            print("⚠️ No camera feed detected. Retrying...")
+            print("⚠️ No camera feed detected.")
             time.sleep(1)
             continue
         _, buffer = cv2.imencode('.jpg', frame)
+        frame = buffer.tobytes()
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 @app.route('/video_feed')
 def video_feed():
@@ -38,105 +39,89 @@ def video_feed():
 def status():
     return jsonify({"status": "ok", "message": "Raspberry Pi camera is running"})
 
-
 # -------------------------------------------------------------------
-# 🌩️ AUTO TUNNEL SYSTEM (Cloudflare → fallback to Ngrok)
+# 🌩️ CLOUD FLARE + NGROK AUTO START
 # -------------------------------------------------------------------
 def start_tunnel():
-    print("🌩️ Attempting Cloudflare tunnel...")
+    """Try Cloudflare first; if blocked, use Ngrok fallback."""
+    print("🌩️ Attempting Cloudflare Tunnel first...")
 
-    if not shutil.which(CLOUDFLARED_PATH):
-        print("⚠️ Cloudflared not found — skipping to Ngrok fallback.")
-        start_ngrok_tunnel()
-        return
+    def run_cloudflare():
+        home_dir = os.path.expanduser("~")
+        return subprocess.Popen(
+            [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--protocol", "http2", "--url", f"http://localhost:{PORT}"],
+            cwd=home_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
 
-    args = [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--protocol", "http2", "--url", f"http://localhost:{PORT}"]
-    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-
-    success = False
-    fail_count = 0
+    process = run_cloudflare()
+    quic_fail_count = 0
+    domain = None
 
     for line in process.stdout:
         line = line.strip()
         print(line)
 
-        # Retry logic if Cloudflare edge unreachable
-        if "timeout" in line.lower() or "failed" in line.lower():
-            fail_count += 1
-            if fail_count > 5:
-                print("⚠️ Too many Cloudflare failures, switching to Ngrok...")
+        # Detect repeated timeouts on port 7844
+        if "7844" in line and "timeout" in line.lower():
+            quic_fail_count += 1
+            if quic_fail_count >= 3:
+                print("\n⚠️ Cloudflare seems blocked (port 7844 timeout). Switching to Ngrok...\n")
                 process.terminate()
-                start_ngrok_tunnel()
-                return
+                return start_ngrok()  # fallback to Ngrok
 
-        # Detect Cloudflare domain
-        match = re.search(r"https://[a-zA-Z0-9\-]+\.trycloudflare\.com", line)
+        # If Cloudflare URL detected
+        match = re.search(r"https://[^\s]+trycloudflare\.com", line)
         if match:
-            domain = match.group(0)
-            print(f"✅ Cloudflare URL: {domain}")
+            domain = match.group(0).strip()
+            print(f"🌍 Cloudflare Tunnel active: {domain}")
             send_domain_to_laptop(domain)
-            success = True
-            break
+            return
 
-    if not success:
-        print("❌ Cloudflare tunnel failed — trying Ngrok...")
-        start_ngrok_tunnel()
+    print("❌ Cloudflare failed to start — switching to Ngrok.")
+    return start_ngrok()
 
-
-# -------------------------------------------------------------------
-# 🌍 NGROK FALLBACK (Free domain, better for strict networks)
-# -------------------------------------------------------------------
-def start_ngrok_tunnel():
-    if not shutil.which(NGROK_PATH):
-        print("❌ Ngrok not installed — please install it manually.")
-        print("   👉 sudo apt install unzip -y && curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | "
-              "sudo tee /etc/apt/trusted.gpg.d/ngrok.asc > /dev/null && "
-              "echo 'deb https://ngrok-agent.s3.amazonaws.com buster main' | sudo tee /etc/apt/sources.list.d/ngrok.list && "
-              "sudo apt update && sudo apt install ngrok -y")
-        return
-
-    print("🌍 Starting Ngrok tunnel...")
-    process = subprocess.Popen(
-        [NGROK_PATH, "http", str(PORT)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
-    )
-
-    # Wait a few seconds before checking tunnel info
-    time.sleep(5)
+def start_ngrok():
+    """Start Ngrok tunnel (port 443 HTTPS tunnel)."""
+    print("🧠 Starting Ngrok tunnel (port 443)...")
     try:
-        tunnel_info = requests.get("http://127.0.0.1:4040/api/tunnels").json()
-        public_url = tunnel_info["tunnels"][0]["public_url"]
-        print(f"✅ Ngrok URL: {public_url}")
-        send_domain_to_laptop(public_url)
-    except Exception as e:
-        print(f"⚠️ Could not retrieve Ngrok URL: {e}")
+        subprocess.Popen([NGROK_PATH, "http", str(PORT)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(5)
+        result = subprocess.run(["curl", "-s", "http://127.0.0.1:4040/api/tunnels"], capture_output=True, text=True)
+        match = re.search(r"https://[^\"]+\.ngrok-free\.app", result.stdout)
+        if match:
+            url = match.group(0)
+            print(f"🌍 Ngrok Tunnel active: {url}")
+            send_domain_to_laptop(url)
+        else:
+            print("⚠️ Could not detect Ngrok URL. Run `ngrok http 5000` manually to check.")
+    except FileNotFoundError:
+        print(f"❌ Ngrok not found at {NGROK_PATH}. Please install with:")
+        print("   sudo apt install unzip && wget https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-linux-arm.zip")
+        print("   unzip ngrok-stable-linux-arm.zip && sudo mv ngrok /usr/local/bin")
 
-
-# -------------------------------------------------------------------
-# 📡 Send the public URL to laptop
-# -------------------------------------------------------------------
 def send_domain_to_laptop(domain):
+    """Send the tunnel URL to any reachable laptop host."""
     for host in LAPTOP_HOSTS:
         try:
             url = f"http://{host}:3000/update-domain"
-            print(f"📡 Sending URL to {url}")
-            res = requests.post(url, json={"url": domain}, timeout=5)
-            if res.status_code == 200:
-                print(f"✅ Sent successfully to {host}")
-                return
+            print(f"📡 Sending Tunnel URL to {url}")
+            requests.post(url, json={"url": domain}, timeout=5)
+            print(f"✅ Sent successfully to {host}")
+            return
         except Exception as e:
             print(f"⚠️ Failed to send to {host}: {e}")
     print("❌ Could not reach any laptop host.")
 
-
 # -------------------------------------------------------------------
-# 🧠 STARTUP
+# 🧠 STARTUP SEQUENCE
 # -------------------------------------------------------------------
 if __name__ == "__main__":
     threading.Thread(target=start_tunnel, daemon=True).start()
+
     hostname = socket.gethostname()
-    print(f"✅ Raspberry Pi camera server on http://{hostname}.local:{PORT}")
+    print(f"✅ Starting camera server on http://{hostname}.local:{PORT}")
     from waitress import serve
     serve(app, host="0.0.0.0", port=PORT)
