@@ -11,14 +11,9 @@ let RPI_FEED_URL = null;
 app.post("/update-domain", (req, res) => {
   const { url } = req.body;
   if (url) {
-    // H.264 stream (direct from Raspberry Pi)
-    RPI_FEED_URL = `${url}/video_feed`;
-    try {
+    RPI_FEED_URL = `${url}/video_feed`; // no hardcoding IP
     fs.writeFileSync("rpi_domain.txt", RPI_FEED_URL);
-    } catch (err) {
-        console.error("❌ Failed to write RPI domain file:", err);
-    }
-    console.log(`🔁 Updated Raspberry Pi domain: ${RPI_FEED_URL}`);
+    console.log(`🔁 Updated Raspberry Pi H.264 feed: ${RPI_FEED_URL}`);
     res.sendStatus(200);
   } else {
     res.sendStatus(400);
