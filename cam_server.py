@@ -1,5 +1,7 @@
 from flask import Flask, Response, jsonify
 import subprocess, threading, requests, socket, time, os, re
+from pyngrok import ngrok
+import requests
 
 app = Flask(__name__)
 
@@ -73,29 +75,21 @@ def send_domain_to_laptop(domain):
     for host in LAPTOP_HOSTS:
         try:
             url = f"http://{host}:3000/update-domain"
+            print(f"📡 Sending Ngrok URL to {url}")
             requests.post(url, json={"url": domain}, timeout=5)
-            print(f"✅ Sent HLS URL to {host}: {domain}")
+            print(f"✅ Sent successfully to {host}")
             return
         except Exception as e:
             print(f"⚠️ Failed to send to {host}: {e}")
     print("❌ Could not reach any laptop host.")
 
 def start_ngrok():
-    print("🚀 Starting Ngrok tunnel...")
-    process = subprocess.Popen(
-        [NGROK_PATH, "http", str(PORT)],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-    )
+    print("🚀 Starting Ngrok tunnel for 172.27.* IP...")
+    public_url = ngrok.connect(PORT, "http")
+    print(f"🌍 Ngrok URL: {public_url}")
 
-    for line in process.stdout:
-        line = line.strip()
-        print(line)
-        match = re.search(r"https://[a-z0-9\-]+\.ngrok-free\.app", line)
-        if match:
-            domain = match.group(0)
-            print(f"🌍 Ngrok public URL: {domain}")
-            send_domain_to_laptop(domain)
-            break
+    # Send the string URL (not the object) to the laptop
+    send_domain_to_laptop(str(public_url))
 
 def start_cloudflare():
     print("🌩️ Starting Cloudflare tunnel...")
