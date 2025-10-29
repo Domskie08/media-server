@@ -1,9 +1,10 @@
 from flask import Flask, jsonify
 import subprocess, re, requests, socket, threading, os, time
+from pyngrok import ngrok  # ✅ pyngrok handles tunnel URL retrieval automatically
 
 app = Flask(__name__)
 
-# 🧠 Node.js server hosts
+# Node.js server hosts
 LAPTOP_HOSTS = [
     "desktop-r98pm6a.local",
     "192.168.100.15",
@@ -13,20 +14,18 @@ LAPTOP_HOSTS = [
 
 PORT = 5000
 CLOUDFLARED_PATH = "/usr/local/bin/cloudflared"
-NGROK_PATH = "/usr/local/bin/ngrok"
 HLS_OUTPUT = "/home/admin/media-server/hls/index.m3u8"
 
-# -------------------------------------------------------------------
-# 🚀 H.264 HLS Streaming
-# -------------------------------------------------------------------
+# -----------------------------
+# H.264 HLS Streaming
+# -----------------------------
 def start_h264_hls():
-    """Start H.264 HLS stream from /dev/video0"""
     os.makedirs(os.path.dirname(HLS_OUTPUT), exist_ok=True)
     ffmpeg_cmd = [
         "ffmpeg",
         "-f", "v4l2",
         "-framerate", "30",
-        "-video_size", "1280x720",      # adjust for full resolution if stable
+        "-video_size", "1920x1080",  # adjust for full camera resolution
         "-i", "/dev/video0",
         "-c:v", "h264_v4l2m2m",
         "-b:v", "4M",
@@ -39,9 +38,10 @@ def start_h264_hls():
     print("🎥 Starting H.264 HLS streaming...")
     return subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
-# -------------------------------------------------------------------
-# 🌐 IP Detection
-# -------------------------------------------------------------------
+
+# -----------------------------
+# Detect LAN IP
+# -----------------------------
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -53,9 +53,10 @@ def get_local_ip():
         s.close()
     return ip
 
-# -------------------------------------------------------------------
-# 🌩️ Tunnel Management
-# -------------------------------------------------------------------
+
+# -----------------------------
+# Tunnel Management
+# -----------------------------
 def start_tunnel():
     ip = get_local_ip()
     print(f"🌐 Detected Pi LAN IP: {ip}")
@@ -67,23 +68,16 @@ def start_tunnel():
         print("🌩️ Using Cloudflare tunnel")
         start_cloudflare()
 
+
 def start_ngrok():
     try:
-        process = subprocess.Popen(
-            [NGROK_PATH, "http", str(PORT)],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-        )
-        for line in process.stdout:
-            line = line.strip()
-            print(line)
-            match = re.search(r"https://[a-z0-9\-]+\.ngrok-free\.app", line)
-            if match:
-                domain = match.group(0)
-                print(f"\n🌍 Ngrok URL: {domain}\n")
-                send_domain_to_laptop(domain)
-                break
-    except FileNotFoundError:
-        print(f"❌ Ngrok not found at {NGROK_PATH}")
+        # ✅ Create Ngrok HTTP tunnel
+        public_url = ngrok.connect(PORT, bind_tls=True).public_url
+        print(f"\n🌍 Ngrok URL: {public_url}\n")
+        send_domain_to_laptop(public_url)
+    except Exception as e:
+        print(f"❌ Ngrok failed: {e}")
+
 
 def start_cloudflare():
     try:
@@ -103,9 +97,10 @@ def start_cloudflare():
     except FileNotFoundError:
         print(f"❌ cloudflared not found at {CLOUDFLARED_PATH}")
 
-# -------------------------------------------------------------------
-# 📡 Send domain to Node.js server
-# -------------------------------------------------------------------
+
+# -----------------------------
+# Send tunnel URL to Node.js server
+# -----------------------------
 def send_domain_to_laptop(domain):
     for host in LAPTOP_HOSTS:
         try:
@@ -118,22 +113,23 @@ def send_domain_to_laptop(domain):
             print(f"⚠️ Failed to send to {host}: {e}")
     print("❌ Could not reach any laptop host.")
 
-# -------------------------------------------------------------------
-# 🧠 Flask endpoints
-# -------------------------------------------------------------------
+
+# -----------------------------
+# Flask endpoints
+# -----------------------------
 @app.route('/status')
 def status():
     return jsonify({"status": "ok", "message": "Raspberry Pi H.264 camera streaming"})
 
 
-# -------------------------------------------------------------------
-# 🏁 Startup
-# -------------------------------------------------------------------
+# -----------------------------
+# Startup
+# -----------------------------
 if __name__ == "__main__":
     # Start H.264 HLS streaming
     threading.Thread(target=start_h264_hls, daemon=True).start()
 
-    # Start Ngrok/Cloudflare tunnel
+    # Start tunnel
     threading.Thread(target=start_tunnel, daemon=True).start()
 
     hostname = socket.gethostname()
