@@ -69,12 +69,56 @@ def start_ffmpeg_stream():
         time.sleep(3)  # delay before retry
 
 
-# -------------------------------------------------------------------
-# 🌩️ Cloudflare Tunnel (auto start + send URL)
-# -------------------------------------------------------------------
+def get_local_ip():
+    """Detect current LAN IP."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
+
+
+def start_tunnel():
+    """Auto-select tunnel: Ngrok for 172.27.*, Cloudflare otherwise."""
+    ip = get_local_ip()
+    print(f"🌐 Detected IP: {ip}")
+
+    if ip.startswith("172.27."):
+        print("🚀 Using NGROK tunnel (corporate network detected)")
+        start_ngrok()
+    else:
+        print("🌩️ Using CLOUDFLARE tunnel (normal network)")
+        start_cloudflare()
+
+
+def start_ngrok():
+    """Start Ngrok tunnel and forward domain to laptop."""
+    try:
+        process = subprocess.Popen(
+            [NGROK_PATH, "http", str(PORT)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        for line in process.stdout:
+            print(line.strip())
+            match = re.search(r"https://[a-z0-9\-]+\.ngrok\-free\.app", line)
+            if match:
+                domain = match.group(0)
+                print(f"\n🌍 Ngrok URL: {domain}\n")
+                send_domain_to_laptop(domain)
+                break
+    except FileNotFoundError:
+        print("❌ Ngrok not found at /usr/local/bin/ngrok. Install it with:")
+        print("   curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc > /dev/null")
+        print("   echo 'deb https://ngrok-agent.s3.amazonaws.com buster main' | sudo tee /etc/apt/sources.list.d/ngrok.list")
+        print("   sudo apt update && sudo apt install ngrok -y")
+
+
 def start_cloudflare():
-    global current_tunnel_domain
-    print("🌩️ Starting Cloudflare tunnel...")
+    """Start Cloudflare tunnel as fallback."""
     process = subprocess.Popen(
         [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{PORT}"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
@@ -82,27 +126,12 @@ def start_cloudflare():
     for line in process.stdout:
         line = line.strip()
         print(line)
-
         match = re.search(r"https://[^\s]+trycloudflare\.com", line)
         if match:
             domain = match.group(0)
-            if domain != current_tunnel_domain:
-                current_tunnel_domain = domain
-                print(f"\n🌍 Cloudflare URL: {domain}\n")
-                send_domain_to_laptop(domain)
-
-
-def send_domain_to_laptop(domain):
-    for host in LAPTOP_HOSTS:
-        try:
-            url = f"http://{host}:3000/update-domain"
-            print(f"📡 Sending Cloudflare URL to {url}")
-            requests.post(url, json={"url": domain}, timeout=5)
-            print(f"✅ Sent successfully to {host}")
-            return
-        except Exception as e:
-            print(f"⚠️ Failed to send to {host}: {e}")
-    print("❌ Could not reach any laptop host.")
+            print(f"\n🌍 Cloudflare URL: {domain}\n")
+            send_domain_to_laptop(domain)
+            break
 
 
 # -------------------------------------------------------------------
@@ -126,7 +155,7 @@ def status():
 # -------------------------------------------------------------------
 if __name__ == "__main__":
     threading.Thread(target=start_ffmpeg_stream, daemon=True).start()
-    threading.Thread(target=start_cloudflare, daemon=True).start()
+    threading.Thread(target=start_tunnel, daemon=True).start()
 
     hostname = socket.gethostname()
     print(f"✅ Running Flask + HLS on http://{hostname}.local:{PORT}")
