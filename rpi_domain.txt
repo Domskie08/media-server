@@ -1,1 +1,1 @@
-https://8402cb7818b4.ngrok-free.app/hls/index.m3u8
+https://1453dbcb0740.ngrok-free.app/hls/index.m3u8
