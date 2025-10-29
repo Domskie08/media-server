@@ -46,8 +46,8 @@ def start_cloudflare():
     try:
         home_dir = os.path.expanduser("~")  # ✅ safely resolves /home/pi or your user folder
         process = subprocess.Popen(
-            [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{PORT}"],
-            cwd=home_dir,  # ✅ ensures a valid working directory
+            [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--protocol", "http2", "--url", f"http://localhost:{PORT}"],
+            cwd=home_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True
