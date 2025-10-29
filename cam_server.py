@@ -1,4 +1,4 @@
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, send_from_directory
 import subprocess, re, requests, socket, threading, os, time
 from pyngrok import ngrok
 
@@ -23,19 +23,18 @@ HLS_DIR = os.path.join(os.getcwd(), "hls")
 os.makedirs(HLS_DIR, exist_ok=True)
 
 # -------------------------------
-# Start FFmpeg H.264 -> HLS
+# Start H.264 HLS streaming via FFmpeg
 # -------------------------------
 def start_h264_hls():
-    print("🎥 Starting H.264 camera -> HLS stream (1080p30)...")
+    print("🎥 Starting H.264 camera -> HLS stream (1080p30 hardware)...")
     ffmpeg_cmd = [
         "ffmpeg",
-        "-f", "v4l2",          # video4linux input
+        "-f", "v4l2",
         "-framerate", "30",
         "-video_size", "1920x1080",
         "-i", "/dev/video0",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-tune", "zerolatency",
+        "-c:v", "h264_omx",          # Hardware-accelerated H.264
+        "-b:v", "4M",
         "-f", "hls",
         "-hls_time", "1",
         "-hls_list_size", "3",
@@ -52,9 +51,12 @@ def video_feed():
     m3u8_path = os.path.join(HLS_DIR, "index.m3u8")
     if not os.path.exists(m3u8_path):
         return "HLS stream not ready yet", 503
-    with open(m3u8_path, "r") as f:
-        content = f.read()
-    return Response(content, mimetype="application/vnd.apple.mpegurl")
+    # The browser/player will request segments automatically
+    return send_from_directory(HLS_DIR, "index.m3u8", mimetype="application/vnd.apple.mpegurl")
+
+@app.route('/hls/<path:filename>')
+def hls_files(filename):
+    return send_from_directory(HLS_DIR, filename)
 
 @app.route('/status')
 def status():
@@ -88,8 +90,8 @@ def send_domain_to_laptop(domain):
 
 def start_ngrok():
     try:
-        tunnel = ngrok.connect(PORT, "http")  # returns NgrokTunnel object
-        public_url = tunnel.public_url       # ✅ convert to string
+        tunnel = ngrok.connect(PORT, "http")
+        public_url = tunnel.public_url
         print(f"🌍 Ngrok public URL: {public_url}")
         send_domain_to_laptop(public_url)
     except Exception as e:
@@ -131,8 +133,12 @@ def start_tunnel():
 # Startup
 # -------------------------------
 if __name__ == "__main__":
+    # Start camera HLS stream in background
     threading.Thread(target=start_h264_hls, daemon=True).start()
+
+    # Start tunneling in background
     threading.Thread(target=start_tunnel, daemon=True).start()
+
     print(f"✅ Starting H.264 HLS camera server on port {PORT}")
     from waitress import serve
     serve(app, host="0.0.0.0", port=PORT)
