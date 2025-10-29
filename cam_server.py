@@ -17,6 +17,8 @@ NGROK_PATH = "/usr/local/bin/ngrok"
 
 # Open webcam (H.264)
 camera = cv2.VideoCapture(0, cv2.CAP_V4L2)
+if not camera.isOpened():
+    print("❌ ERROR: Cannot open camera. Check camera connection or permissions.")
 camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"H264"))
 camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -26,13 +28,16 @@ def generate_frames():
     while True:
         success, frame = camera.read()
         if not success:
-            print("⚠️ No camera feed detected.")
+            print(f"⚠️ Camera feed failed at {time.strftime('%H:%M:%S')}")
             time.sleep(1)
             continue
-        _, buffer = cv2.imencode('.jpg', frame)
-        frame_bytes = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        try:
+            _, buffer = cv2.imencode('.jpg', frame)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except Exception as e:
+            print(f"❌ Error encoding frame: {e}")
 
 @app.route('/video_feed')
 def video_feed():

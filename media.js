@@ -13,7 +13,11 @@ app.post("/update-domain", (req, res) => {
   if (url) {
     // H.264 stream (direct from Raspberry Pi)
     RPI_FEED_URL = `${url}/video_feed`;
+    try {
     fs.writeFileSync("rpi_domain.txt", RPI_FEED_URL);
+    } catch (err) {
+        console.error("❌ Failed to write RPI domain file:", err);
+    }
     console.log(`🔁 Updated Raspberry Pi domain: ${RPI_FEED_URL}`);
     res.sendStatus(200);
   } else {
