@@ -31,7 +31,7 @@ def start_h264_hls():
         "ffmpeg",
         "-f", "v4l2",
         "-framerate", "30",
-        "-video_size", "1920x1080",
+        "-video_size", "1280x720",
         "-i", "/dev/video0",
         "-c:v", "h264_omx",          # Hardware-accelerated H.264
         "-b:v", "4M",
