@@ -1,5 +1,6 @@
 from flask import Flask, Response, jsonify
 import subprocess, re, requests, socket, threading, os, time
+from pyngrok import ngrok
 
 app = Flask(__name__)
 
@@ -87,10 +88,9 @@ def send_domain_to_laptop(domain):
 
 def start_ngrok():
     try:
-        url = subprocess.check_output([NGROK_PATH, "http", str(PORT)], text=True)
-        # Sometimes pyngrok library works better for parsing, you can also switch
-        print(f"🌍 Ngrok public URL: {url.strip()}")
-        send_domain_to_laptop(url.strip())
+        public_url = ngrok.connect(PORT, "http")  # returns https://xxxx.ngrok-free.app
+        print(f"🌍 Ngrok public URL: {public_url}")
+        send_domain_to_laptop(public_url)
     except Exception as e:
         print(f"❌ Ngrok error: {e}")
 
