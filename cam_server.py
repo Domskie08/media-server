@@ -79,7 +79,7 @@ def send_domain_to_laptop(domain):
         try:
             url = f"http://{host}:3000/update-domain"
             print(f"📡 Sending HLS URL to {url}")
-            requests.post(url, json={"url": domain}, timeout=5)
+            requests.post(url, json={"url": str(domain)}, timeout=5)
             print(f"✅ Sent successfully to {host}")
             return
         except Exception as e:
@@ -88,7 +88,8 @@ def send_domain_to_laptop(domain):
 
 def start_ngrok():
     try:
-        public_url = ngrok.connect(PORT, "http")  # returns https://xxxx.ngrok-free.app
+        tunnel = ngrok.connect(PORT, "http")  # returns NgrokTunnel object
+        public_url = tunnel.public_url       # ✅ convert to string
         print(f"🌍 Ngrok public URL: {public_url}")
         send_domain_to_laptop(public_url)
     except Exception as e:
