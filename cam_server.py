@@ -1,80 +1,94 @@
-from flask import Flask, Response, jsonify
-import cv2, subprocess, re, requests, socket, time, threading, os
+from flask import Flask, Response, jsonify, send_from_directory
+import cv2, subprocess, socket, threading, os, time, requests, re
 
 app = Flask(__name__)
 
-# Laptop hostnames or IPs (where media.js runs)
+# 💻 Laptop hosts (media.js server)
 LAPTOP_HOSTS = [
-    "desktop-r98pm6a.local",  # hostname
-    "192.168.100.15",         # fallback IP
+    "desktop-r98pm6a.local",
+    "192.168.100.15",
     "10.191.254.91",
     "172.27.44.17"
 ]
 
 PORT = 5000
+HLS_DIR = "hls"  # folder for HLS segments
 CLOUDFLARED_PATH = "/usr/local/bin/cloudflared"
 NGROK_PATH = "/usr/local/bin/ngrok"
 
-# 🎥 Open webcam (H.264 hardware accelerated)
-camera = cv2.VideoCapture(0, cv2.CAP_V4L2)
-camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"H264"))
-camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-camera.set(cv2.CAP_PROP_FPS, 30)
+# 🎥 Camera settings (H.264)
+CAM_WIDTH = 640
+CAM_HEIGHT = 480
+FPS = 30
 
-def generate_frames():
-    """Stream frames from camera in H.264 format."""
-    while True:
-        success, frame = camera.read()
-        if not success:
-            print("⚠️ No camera feed detected.")
-            time.sleep(1)
-            continue
-        _, buffer = cv2.imencode('.jpg', frame)
-        frame = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+# Make HLS directory
+os.makedirs(HLS_DIR, exist_ok=True)
 
-@app.route('/video_feed')
-def video_feed():
-    return Response(generate_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+# -----------------------------
+# Start HLS streaming via ffmpeg
+# -----------------------------
+def start_hls():
+    """Start ffmpeg H.264 -> HLS"""
+    camera = "/dev/video0"  # default Pi camera
+    cmd = [
+        "ffmpeg",
+        "-f", "v4l2",
+        "-framerate", str(FPS),
+        "-video_size", f"{CAM_WIDTH}x{CAM_HEIGHT}",
+        "-i", camera,
+        "-c:v", "h264_omx",          # hardware-accelerated H.264
+        "-b:v", "1M",
+        "-f", "hls",
+        "-hls_time", "2",
+        "-hls_list_size", "5",
+        "-hls_flags", "delete_segments",
+        f"{HLS_DIR}/index.m3u8"
+    ]
+    print("🎥 Starting HLS stream via ffmpeg...")
+    subprocess.Popen(cmd)
+
+# -----------------------------
+# Flask routes
+# -----------------------------
+@app.route('/hls/<path:filename>')
+def hls_files(filename):
+    """Serve HLS .m3u8 and .ts files"""
+    return send_from_directory(HLS_DIR, filename)
 
 @app.route('/status')
 def status():
     return jsonify({"status": "ok", "message": "Raspberry Pi camera is running"})
 
-# ---------------------- Tunnel Logic ----------------------
-
+# -----------------------------
+# Auto tunnel selection
+# -----------------------------
 def get_local_ip():
-    """Detect current LAN IP."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
-    except Exception:
+    except:
         ip = "127.0.0.1"
     finally:
         s.close()
     return ip
 
-def start_tunnel():
-    """Auto-select tunnel: Ngrok for 172.27.*, Cloudflare otherwise."""
-    ip = get_local_ip()
-    print(f"🌐 Detected IP: {ip}")
+def send_domain_to_laptop(domain):
+    for host in LAPTOP_HOSTS:
+        try:
+            url = f"http://{host}:3000/update-domain"
+            print(f"📡 Sending HLS URL to {url}")
+            requests.post(url, json={"url": domain}, timeout=5)
+            print(f"✅ Sent successfully to {host}")
+            return
+        except Exception as e:
+            print(f"⚠️ Failed to send to {host}: {e}")
+    print("❌ Could not reach any laptop host.")
 
-    if ip.startswith("172.27."):
-        print("🚀 Using NGROK tunnel (corporate network detected)")
-        start_ngrok()  # ✅ fixed: removed argument
-    else:
-        print("🌩️ Using CLOUDFLARE tunnel (normal network)")
-        start_cloudflare()
-
-def start_ngrok():
-    """Start Ngrok tunnel and forward domain to laptop."""
+def start_ngrok(port):
     try:
         process = subprocess.Popen(
-            [NGROK_PATH, "http", str(PORT)],
+            [NGROK_PATH, "http", str(port)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
         for line in process.stdout:
@@ -87,17 +101,12 @@ def start_ngrok():
                 send_domain_to_laptop(domain)
                 break
     except FileNotFoundError:
-        print("❌ Ngrok not found at /usr/local/bin/ngrok.")
-        print("   Install with:")
-        print("   curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc > /dev/null")
-        print("   echo 'deb https://ngrok-agent.s3.amazonaws.com buster main' | sudo tee /etc/apt/sources.list.d/ngrok.list")
-        print("   sudo apt update && sudo apt install ngrok -y")
+        print("❌ Ngrok not found. Install it.")
 
-def start_cloudflare():
-    """Start Cloudflare tunnel as fallback."""
+def start_cloudflare(port):
     try:
         process = subprocess.Popen(
-            [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{PORT}"],
+            [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{port}"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
         for line in process.stdout:
@@ -110,24 +119,23 @@ def start_cloudflare():
                 send_domain_to_laptop(domain)
                 break
     except FileNotFoundError:
-        print("❌ cloudflared not found at /usr/local/bin/cloudflared.")
-        print("   Install with: sudo apt install cloudflared -y")
+        print("❌ cloudflared not found.")
 
-def send_domain_to_laptop(domain):
-    """Send generated domain to Node.js media server."""
-    for host in LAPTOP_HOSTS:
-        try:
-            url = f"http://{host}:3000/update-domain"
-            print(f"📡 Sending domain to {url}")
-            requests.post(url, json={"url": domain}, timeout=5)
-            print(f"✅ Sent successfully to {host}")
-            return
-        except Exception as e:
-            print(f"⚠️ Failed to send to {host}: {e}")
-    print("❌ Could not reach any laptop host.")
+def start_tunnel():
+    ip = get_local_ip()
+    print(f"🌐 Detected Pi LAN IP: {ip}")
+    if ip.startswith("172.27."):
+        print("🚀 Using NGROK tunnel (corporate network detected)")
+        start_ngrok(PORT)
+    else:
+        print("🌩️ Using CLOUDFLARE tunnel")
+        start_cloudflare(PORT)
 
-# ---------------------- Startup ----------------------
+# -----------------------------
+# Startup sequence
+# -----------------------------
 if __name__ == "__main__":
+    threading.Thread(target=start_hls, daemon=True).start()
     threading.Thread(target=start_tunnel, daemon=True).start()
 
     hostname = socket.gethostname()
