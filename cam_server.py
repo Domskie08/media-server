@@ -1,135 +1,76 @@
-from flask import Flask, Response, jsonify
-import cv2, subprocess, re, requests, socket, time, threading, os
+from flask import Flask, send_from_directory, jsonify
+import cv2, subprocess, threading, os, socket, requests, re, time
 
 app = Flask(__name__)
 
-# 🧠 Laptop hosts for sending the active tunnel domain
+# 🧠 Laptop IPs (for domain sync)
 LAPTOP_HOSTS = [
     "desktop-r98pm6a.local",
     "192.168.100.15",
     "10.191.254.91",
-    "172.27.44.17"
+    "172.27.44.73"
 ]
 
 PORT = 5000
 CLOUDFLARED_PATH = "/usr/local/bin/cloudflared"
-NGROK_PATH = "/usr/local/bin/ngrok"
 
-# 🎥 Open webcam
-camera = cv2.VideoCapture(0)
+# 📁 Folder for HLS files
+HLS_DIR = "hls"
+os.makedirs(HLS_DIR, exist_ok=True)
 
-def generate_frames():
-    while True:
-        success, frame = camera.read()
-        if not success:
-            print("⚠️ No camera feed detected.")
-            time.sleep(1)
-            continue
-        _, buffer = cv2.imencode('.jpg', frame)
-        frame = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+# 🎥 Start ffmpeg process to stream camera → HLS
+def start_ffmpeg_stream():
+    print("🎥 Starting H.264 → HLS stream...")
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-f", "v4l2",              # Capture from camera
+        "-input_format", "h264",   # Hardware encoding (use mjpeg if unsupported)
+        "-video_size", "1280x720",
+        "-i", "/dev/video0",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-f", "hls",
+        "-hls_time", "2",          # 2s per segment
+        "-hls_list_size", "4",
+        "-hls_flags", "delete_segments",
+        f"{HLS_DIR}/index.m3u8"
+    ]
+    subprocess.Popen(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 
-@app.route('/video_feed')
-def video_feed():
-    return Response(generate_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+# 🛰 Serve the HLS files
+@app.route('/hls/<path:filename>')
+def serve_hls(filename):
+    return send_from_directory(HLS_DIR, filename)
 
 @app.route('/status')
 def status():
-    return jsonify({"status": "ok", "message": "Raspberry Pi camera is running"})
+    return jsonify({"status": "ok", "stream": f"/hls/index.m3u8"})
 
-# -------------------------------------------------------------------
-# 🌍 IP + Tunnel Detection
-# -------------------------------------------------------------------
-def get_local_ip():
-    """Detect local IP address."""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        print(f"📡 Local IP detected: {ip}")
-        return ip
-    except Exception:
-        return "0.0.0.0"
-
-# -------------------------------------------------------------------
-# 🌩️ Tunnel Control: Cloudflare or Ngrok
-# -------------------------------------------------------------------
+# 🌩 Auto-tunnel via Ngrok (or Cloudflare fallback)
 def start_tunnel():
-    local_ip = get_local_ip()
-
-    # 🧠 If IP starts with 172.27.44, go Ngrok immediately
-    if local_ip.startswith("172.27.44."):
-        print("⚙️ Detected restricted network (172.27.44.x). Using Ngrok directly.")
-        return start_ngrok()
-
-    # Otherwise, try Cloudflare first
-    print("🌩️ Attempting Cloudflare Tunnel first...")
-
-    def run_cloudflare():
-        home_dir = os.path.expanduser("~")
-        return subprocess.Popen(
-            [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--protocol", "http2", "--url", f"http://localhost:{PORT}"],
-            cwd=home_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
+    print("🌩 Starting Ngrok tunnel...")
+    try:
+        process = subprocess.Popen(
+            ["ngrok", "http", str(PORT), "--log", "stdout"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
 
-    process = run_cloudflare()
-    quic_fail_count = 0
-    domain = None
-
-    for line in process.stdout:
-        line = line.strip()
-        print(line)
-
-        # Detect repeated timeouts on port 7844
-        if "7844" in line and "timeout" in line.lower():
-            quic_fail_count += 1
-            if quic_fail_count >= 3:
-                print("\n⚠️ Cloudflare seems blocked (port 7844 timeout). Switching to Ngrok...\n")
-                process.terminate()
-                return start_ngrok()
-
-        # Detect Cloudflare domain
-        match = re.search(r"https://[^\s]+trycloudflare\.com", line)
-        if match:
-            domain = match.group(0).strip()
-            print(f"🌍 Cloudflare Tunnel active: {domain}")
-            send_domain_to_laptop(domain)
-            return
-
-    print("❌ Cloudflare failed to start — switching to Ngrok.")
-    return start_ngrok()
-
-def start_ngrok():
-    """Start Ngrok tunnel on port 443 (HTTPS)."""
-    print("🧠 Starting Ngrok tunnel (port 443)...")
-    try:
-        subprocess.Popen([NGROK_PATH, "http", str(PORT)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(5)
-        result = subprocess.run(["curl", "-s", "http://127.0.0.1:4040/api/tunnels"], capture_output=True, text=True)
-        match = re.search(r"https://[^\"]+\.ngrok-free\.app", result.stdout)
-        if match:
-            url = match.group(0)
-            print(f"🌍 Ngrok Tunnel active: {url}")
-            send_domain_to_laptop(url)
-        else:
-            print("⚠️ Could not detect Ngrok URL. Run `ngrok http 5000` manually to check.")
-    except FileNotFoundError:
-        print(f"❌ Ngrok not found at {NGROK_PATH}. Please install it:")
-        print("   wget https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-linux-arm.zip")
-        print("   unzip ngrok-stable-linux-arm.zip && sudo mv ngrok /usr/local/bin")
+        for line in process.stdout:
+            match = re.search(r"https://[a-z0-9\-]+\.ngrok-free\.app", line)
+            if match:
+                domain = match.group(0)
+                print(f"🌍 Ngrok URL: {domain}")
+                send_domain_to_laptop(domain)
+                break
+    except Exception as e:
+        print(f"⚠️ Tunnel error: {e}")
 
 def send_domain_to_laptop(domain):
-    """Send the tunnel URL to any reachable laptop host."""
     for host in LAPTOP_HOSTS:
         try:
             url = f"http://{host}:3000/update-domain"
-            print(f"📡 Sending Tunnel URL to {url}")
+            print(f"📡 Sending stream URL to {url}")
             requests.post(url, json={"url": domain}, timeout=5)
             print(f"✅ Sent successfully to {host}")
             return
@@ -137,13 +78,12 @@ def send_domain_to_laptop(domain):
             print(f"⚠️ Failed to send to {host}: {e}")
     print("❌ Could not reach any laptop host.")
 
-# -------------------------------------------------------------------
-# 🚀 STARTUP
-# -------------------------------------------------------------------
+# 🧠 Startup
 if __name__ == "__main__":
+    threading.Thread(target=start_ffmpeg_stream, daemon=True).start()
     threading.Thread(target=start_tunnel, daemon=True).start()
 
     hostname = socket.gethostname()
-    print(f"✅ Starting camera server on http://{hostname}.local:{PORT}")
+    print(f"✅ Flask HLS server on http://{hostname}.local:{PORT}")
     from waitress import serve
     serve(app, host="0.0.0.0", port=PORT)

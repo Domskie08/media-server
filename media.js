@@ -12,7 +12,8 @@ let RPI_FEED_URL = null;
 app.post("/update-domain", (req, res) => {
   const { url } = req.body;
   if (url) {
-    RPI_FEED_URL = `${url}/video_feed`;
+    // 🔄 Instead of /video_feed, use HLS stream
+    RPI_FEED_URL = `${url}/hls/index.m3u8`;
     fs.writeFileSync("rpi_domain.txt", RPI_FEED_URL);
     console.log(`🔁 Updated Raspberry Pi domain: ${RPI_FEED_URL}`);
     res.sendStatus(200);
@@ -28,12 +29,40 @@ app.get("/", (req, res) => {
       : "No connection to Raspberry Pi";
   }
 
+  const isConnected = RPI_FEED_URL.includes("http");
+
   res.send(`
     <html>
-      <body style="background:black;display:flex;align-items:center;justify-content:center;height:100vh;">
-        ${RPI_FEED_URL.includes("http")
-          ? `<img src="${RPI_FEED_URL}" style="width:100%;height:auto;">`
-          : `<h2 style="color:white;">No connection to Raspberry Pi</h2>`}
+      <head>
+        <title>Raspberry Pi HLS Stream</title>
+        <style>
+          body {
+            background:black;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            height:100vh;
+            margin:0;
+          }
+          video {
+            width:100%;
+            height:auto;
+            border-radius:12px;
+            box-shadow:0 0 20px rgba(255,255,255,0.3);
+          }
+          h2 { color:white; font-family:sans-serif; }
+        </style>
+      </head>
+      <body>
+        ${
+          isConnected
+            ? `
+            <video id="stream" controls autoplay playsinline muted>
+              <source src="${RPI_FEED_URL}" type="application/x-mpegURL">
+              Your browser does not support HLS playback.
+            </video>`
+            : `<h2>No connection to Raspberry Pi</h2>`
+        }
       </body>
     </html>
   `);
