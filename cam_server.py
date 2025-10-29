@@ -33,16 +33,19 @@ def start_hls():
     cmd = [
         "ffmpeg",
         "-f", "v4l2",
-        "-framerate", str(FPS),
-        "-video_size", f"{CAM_WIDTH}x{CAM_HEIGHT}",
-        "-i", camera,
-        "-c:v", "h264_v4l2m2m",
-        "-b:v", "1M",
+        "-framerate", "30",
+        "-video_size", "1920x1080",
+        "-input_format", "mjpeg",
+        "-i", "/dev/video0",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-b:v", "4M",
         "-f", "hls",
-        "-hls_time", "2",
+        "-hls_time", "1",
         "-hls_list_size", "5",
         "-hls_flags", "delete_segments",
-        f"{HLS_DIR}/index.m3u8"
+        os.path.join(HLS_DIR, "index.m3u8")
     ]
     print("🎥 Starting HLS stream via ffmpeg...")
     subprocess.Popen(cmd)
