@@ -1,73 +1,57 @@
-from flask import Flask, send_from_directory, jsonify
-import cv2, subprocess, threading, os, time, re, requests, socket, signal
+from flask import Flask, Response, jsonify
+import cv2, subprocess, re, requests, socket, time, threading, os
 
 app = Flask(__name__)
 
-PORT = 5000
-CLOUDFLARED_PATH = "/usr/local/bin/cloudflared"
-VIDEO_DIR = "static/hls"
-os.makedirs(VIDEO_DIR, exist_ok=True)
-
+# 🧠 Your laptop hostnames or IPs (where media.js runs)
 LAPTOP_HOSTS = [
-    "desktop-r98pm6a.local",
-    "192.168.100.15",
+    "desktop-r98pm6a.local",  # hostname
+    "192.168.100.15",         # fallback IP
     "10.191.254.91",
     "172.27.44.17"
 ]
 
-current_tunnel_domain = None
-ffmpeg_process = None
+PORT = 5000
+CLOUDFLARED_PATH = "/usr/local/bin/cloudflared"
+NGROK_PATH = "/usr/local/bin/ngrok"
 
+# 🎥 Open webcam (H.264 hardware accelerated)
+camera = cv2.VideoCapture(0, cv2.CAP_V4L2)
+camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"H264"))
+camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+camera.set(cv2.CAP_PROP_FPS, 30)
 
-# -------------------------------------------------------------------
-# 🎥 FFmpeg H.264 Stream (Auto-restart if fails)
-# -------------------------------------------------------------------
-def start_ffmpeg_stream():
-    global ffmpeg_process
+def generate_frames():
+    """Stream frames from camera in H.264 format."""
     while True:
-        try:
-            print("🎥 Starting FFmpeg H.264 stream...")
-            # Kill any old FFmpeg
-            subprocess.run("pkill -f ffmpeg", shell=True)
+        success, frame = camera.read()
+        if not success:
+            print("⚠️ No camera feed detected.")
             time.sleep(1)
+            continue
+        _, buffer = cv2.imencode('.jpg', frame)
+        frame = buffer.tobytes()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
-            ffmpeg_cmd = [
-                "ffmpeg",
-                "-f", "v4l2",
-                "-framerate", "30",
-                "-video_size", "640x480",
-                "-i", "/dev/video0",
-                "-vcodec", "libx264",
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-f", "hls",
-                "-hls_time", "2",
-                "-hls_list_size", "5",
-                "-hls_flags", "delete_segments",
-                os.path.join(VIDEO_DIR, "index.m3u8")
-            ]
 
-            ffmpeg_process = subprocess.Popen(
-                ffmpeg_cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
+@app.route('/video_feed')
+def video_feed():
+    """Video stream endpoint."""
+    return Response(generate_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
-            # Wait & monitor
-            while True:
-                time.sleep(5)
-                if ffmpeg_process.poll() is not None:
-                    print("⚠️ FFmpeg stopped — restarting...")
-                    break
 
-                if not os.path.exists(os.path.join(VIDEO_DIR, "index.m3u8")):
-                    print("⚠️ No HLS output found — restarting FFmpeg...")
-                    break
+@app.route('/status')
+def status():
+    """Health check."""
+    return jsonify({"status": "ok", "message": "Raspberry Pi camera is running"})
 
-        except Exception as e:
-            print(f"❌ FFmpeg error: {e}")
-        time.sleep(3)  # delay before retry
 
+# -------------------------------------------------------------------
+# 🌩️ AUTO TUNNEL SELECTION (Ngrok or Cloudflare)
+# -------------------------------------------------------------------
 
 def get_local_ip():
     """Detect current LAN IP."""
@@ -119,46 +103,46 @@ def start_ngrok():
 
 def start_cloudflare():
     """Start Cloudflare tunnel as fallback."""
-    process = subprocess.Popen(
-        [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{PORT}"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-    )
-    for line in process.stdout:
-        line = line.strip()
-        print(line)
-        match = re.search(r"https://[^\s]+trycloudflare\.com", line)
-        if match:
-            domain = match.group(0)
-            print(f"\n🌍 Cloudflare URL: {domain}\n")
-            send_domain_to_laptop(domain)
-            break
+    try:
+        process = subprocess.Popen(
+            [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{PORT}"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        for line in process.stdout:
+            line = line.strip()
+            print(line)
+            match = re.search(r"https://[^\s]+trycloudflare\.com", line)
+            if match:
+                domain = match.group(0)
+                print(f"\n🌍 Cloudflare URL: {domain}\n")
+                send_domain_to_laptop(domain)
+                break
+    except FileNotFoundError:
+        print("❌ cloudflared not found at /usr/local/bin/cloudflared.")
+        print("   Install with: sudo apt install cloudflared -y")
+
+
+def send_domain_to_laptop(domain):
+    """Send generated domain to Node.js media server."""
+    for host in LAPTOP_HOSTS:
+        try:
+            url = f"http://{host}:3000/update-domain"
+            print(f"📡 Sending Cloudflare/Ngrok URL to {url}")
+            requests.post(url, json={"url": domain}, timeout=5)
+            print(f"✅ Sent successfully to {host}")
+            return
+        except Exception as e:
+            print(f"⚠️ Failed to send to {host}: {e}")
+    print("❌ Could not reach any laptop host.")
 
 
 # -------------------------------------------------------------------
-# 🌐 Flask Routes
-# -------------------------------------------------------------------
-@app.route('/hls/<path:filename>')
-def serve_hls(filename):
-    return send_from_directory(VIDEO_DIR, filename)
-
-@app.route('/status')
-def status():
-    running = ffmpeg_process and ffmpeg_process.poll() is None
-    return jsonify({
-        "status": "ok" if running else "error",
-        "message": "HLS stream running" if running else "FFmpeg not active"
-    })
-
-
-# -------------------------------------------------------------------
-# 🧠 Startup Sequence
+# 🧠 STARTUP SEQUENCE
 # -------------------------------------------------------------------
 if __name__ == "__main__":
-    threading.Thread(target=start_ffmpeg_stream, daemon=True).start()
     threading.Thread(target=start_tunnel, daemon=True).start()
 
     hostname = socket.gethostname()
-    print(f"✅ Running Flask + HLS on http://{hostname}.local:{PORT}")
-
+    print(f"✅ Starting camera server on http://{hostname}.local:{PORT}")
     from waitress import serve
     serve(app, host="0.0.0.0", port=PORT)
