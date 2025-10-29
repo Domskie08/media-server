@@ -136,3 +136,6 @@ if __name__ == "__main__":
     print(f"✅ Starting camera server on http://{hostname}.local:{PORT}")
     from waitress import serve
     serve(app, host="0.0.0.0", port=PORT)
+
+
+#ngrok config add-authtoken 2JLxBDyY6QSNuulZSdXPyVhflsp_4wsiZpMcrwFCpckrmxTkE
