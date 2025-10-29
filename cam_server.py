@@ -1,6 +1,5 @@
 from flask import Flask, Response, jsonify
-import cv2, subprocess, re, requests, socket, time, threading, os
-from pyngrok import ngrok  # make sure to install pyngrok: pip install pyngrok
+import subprocess, re, requests, socket, threading, os, time
 
 app = Flask(__name__)
 
@@ -8,54 +7,67 @@ app = Flask(__name__)
 # Configuration
 # -------------------------------
 LAPTOP_HOSTS = [
-    "desktop-r98pm6a.local",  # hostname
-    "192.168.100.15",         # fallback IP
+    "desktop-r98pm6a.local",
+    "192.168.100.15",
     "10.191.254.91",
     "172.27.44.17"
 ]
 
 PORT = 5000
 CLOUDFLARED_PATH = "/usr/local/bin/cloudflared"
+NGROK_PATH = "/usr/local/bin/ngrok"
+
+# HLS output folder
+HLS_DIR = os.path.join(os.getcwd(), "hls")
+os.makedirs(HLS_DIR, exist_ok=True)
 
 # -------------------------------
-# Open camera
+# Start FFmpeg H.264 -> HLS
 # -------------------------------
-camera = cv2.VideoCapture(0, cv2.CAP_V4L2)
-camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"H264"))
-camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-camera.set(cv2.CAP_PROP_FPS, 30)
+def start_h264_hls():
+    print("🎥 Starting H.264 camera -> HLS stream (1080p30)...")
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-f", "v4l2",          # video4linux input
+        "-framerate", "30",
+        "-video_size", "1920x1080",
+        "-i", "/dev/video0",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-f", "hls",
+        "-hls_time", "1",
+        "-hls_list_size", "3",
+        "-hls_flags", "delete_segments",
+        os.path.join(HLS_DIR, "index.m3u8")
+    ]
+    subprocess.Popen(ffmpeg_cmd)
 
-def generate_frames():
-    while True:
-        success, frame = camera.read()
-        if not success:
-            print("⚠️ No camera feed detected.")
-            time.sleep(1)
-            continue
-        _, buffer = cv2.imencode('.jpg', frame)  # still sending MJPEG
-        frame_bytes = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-
+# -------------------------------
+# Flask routes
+# -------------------------------
 @app.route('/video_feed')
 def video_feed():
-    return Response(generate_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    m3u8_path = os.path.join(HLS_DIR, "index.m3u8")
+    if not os.path.exists(m3u8_path):
+        return "HLS stream not ready yet", 503
+    with open(m3u8_path, "r") as f:
+        content = f.read()
+    return Response(content, mimetype="application/vnd.apple.mpegurl")
 
 @app.route('/status')
 def status():
-    return jsonify({"status": "ok", "message": "Raspberry Pi camera is running"})
+    return jsonify({"status": "ok", "message": "H.264 HLS camera is running"})
 
 # -------------------------------
-# Tunnel / Network
+# Network / Tunneling
 # -------------------------------
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
-    except Exception:
+    except:
         ip = "127.0.0.1"
     finally:
         s.close()
@@ -65,7 +77,7 @@ def send_domain_to_laptop(domain):
     for host in LAPTOP_HOSTS:
         try:
             url = f"http://{host}:3000/update-domain"
-            print(f"📡 Sending public URL to {url}")
+            print(f"📡 Sending HLS URL to {url}")
             requests.post(url, json={"url": domain}, timeout=5)
             print(f"✅ Sent successfully to {host}")
             return
@@ -75,9 +87,10 @@ def send_domain_to_laptop(domain):
 
 def start_ngrok():
     try:
-        url = ngrok.connect(PORT)
-        print(f"🌍 Ngrok public URL: {url}")
-        send_domain_to_laptop(url)
+        url = subprocess.check_output([NGROK_PATH, "http", str(PORT)], text=True)
+        # Sometimes pyngrok library works better for parsing, you can also switch
+        print(f"🌍 Ngrok public URL: {url.strip()}")
+        send_domain_to_laptop(url.strip())
     except Exception as e:
         print(f"❌ Ngrok error: {e}")
 
@@ -100,27 +113,25 @@ def start_cloudflare():
                 print(f"🌍 Cloudflare URL: {domain}")
                 send_domain_to_laptop(domain)
                 break
-    except FileNotFoundError:
-        print("❌ cloudflared not found at /usr/local/bin/cloudflared.")
     except Exception as e:
-        print(f"⚠️ Cloudflare error: {e}")
+        print(f"❌ Cloudflare error: {e}")
 
 def start_tunnel():
     ip = get_local_ip()
     print(f"🌐 Detected Pi LAN IP: {ip}")
     if ip.startswith("172.27."):
-        print("🚀 Using Ngrok (corporate LAN detected)")
+        print("🚀 Using Ngrok tunnel")
         start_ngrok()
     else:
-        print("🌩️ Using Cloudflare")
+        print("🌩️ Using Cloudflare tunnel")
         start_cloudflare()
 
 # -------------------------------
 # Startup
 # -------------------------------
 if __name__ == "__main__":
+    threading.Thread(target=start_h264_hls, daemon=True).start()
     threading.Thread(target=start_tunnel, daemon=True).start()
-    hostname = socket.gethostname()
-    print(f"✅ Starting camera server on http://{hostname}.local:{PORT}")
+    print(f"✅ Starting H.264 HLS camera server on port {PORT}")
     from waitress import serve
     serve(app, host="0.0.0.0", port=PORT)
