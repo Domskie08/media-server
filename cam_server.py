@@ -36,7 +36,7 @@ def start_hls():
         "-framerate", str(FPS),
         "-video_size", f"{CAM_WIDTH}x{CAM_HEIGHT}",
         "-i", camera,
-        "-c:v", "h264_omx",          # hardware-accelerated H.264
+        "-c:v", "h264_v4l2m2m",
         "-b:v", "1M",
         "-f", "hls",
         "-hls_time", "2",
