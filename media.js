@@ -1,63 +1,113 @@
 import express from "express";
+import path from "path";
+import { fileURLToPath } from "url";
+import bodyParser from "body-parser";
 import fs from "fs";
 
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-let RPI_FEED_URL = null;
+app.use(bodyParser.json());
+app.use(express.static(path.join(__dirname, "public")));
 
-// ✅ Receive HLS URL from Pi
+let currentDomain = "";
+
+// ------------------------------------------------------
+// 📡 API Endpoint - update from Raspberry Pi
+// ------------------------------------------------------
 app.post("/update-domain", (req, res) => {
   const { url } = req.body;
-  if (url) {
-    RPI_FEED_URL = url;
-    fs.writeFileSync("rpi_domain.txt", RPI_FEED_URL);
-    console.log(`🔁 Updated HLS URL: ${RPI_FEED_URL}`);
-    res.sendStatus(200);
-  } else {
-    res.sendStatus(400);
-  }
+  if (!url) return res.status(400).json({ error: "Missing URL" });
+
+  currentDomain = url;
+  console.log(`✅ Received RTSP tunnel URL: ${url}`);
+
+  // Save for persistence (optional)
+  fs.writeFileSync("domain.txt", url);
+
+  res.json({ message: "Domain updated", url });
 });
 
-// ✅ Serve HTML page with HLS.js player
+// ------------------------------------------------------
+// 🌐 Frontend page - show video player
+// ------------------------------------------------------
 app.get("/", (req, res) => {
-  if (!RPI_FEED_URL) {
-    RPI_FEED_URL = fs.existsSync("rpi_domain.txt") ? fs.readFileSync("rpi_domain.txt", "utf-8") : null;
-  }
-
-  if (!RPI_FEED_URL) {
-    res.send("<h2>No connection to Raspberry Pi</h2>");
-    return;
-  }
-
   res.send(`
-    <html>
-      <head>
-        <title>Raspberry Pi H.264 HLS Stream</title>
-        <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-      </head>
-      <body style="margin:0;background:black;display:flex;justify-content:center;align-items:center;height:100vh;">
-        <video id="video" controls autoplay playsinline muted style="width:100%;height:auto;"></video>
-        <script>
-          const video = document.getElementById('video');
-          const url = "${RPI_FEED_URL}";
-          if(Hls.isSupported()) {
-            const hls = new Hls();
-            hls.loadSource(url);
-            hls.attachMedia(video);
-            hls.on(Hls.Events.MANIFEST_PARSED, () => video.play());
-          } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-            video.src = url;
-            video.addEventListener('loadedmetadata', () => video.play());
-          }
-        </script>
-      </body>
-    </html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>RTSP Live Stream</title>
+<style>
+  body {
+    margin: 0; padding: 0;
+    background: #111; color: #fff;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    height: 100vh;
+    font-family: sans-serif;
+  }
+  video {
+    width: 80%; max-width: 900px;
+    border: 3px solid #00ffcc;
+    border-radius: 16px;
+    box-shadow: 0 0 20px #00ffaa88;
+    background: black;
+  }
+  #domain {
+    margin-top: 20px;
+    font-size: 1.1em;
+    color: #0f0;
+  }
+</style>
+</head>
+<body>
+  <h2>🎥 RTSP Live Stream</h2>
+  <video id="videoPlayer" controls autoplay muted playsinline></video>
+  <div id="domain">Waiting for stream URL...</div>
+
+  <script src="https://cdn.jsdelivr.net/npm/jsmpeg@0.2.1/jsmpeg.min.js"></script>
+  <script>
+    async function loadStream() {
+      const res = await fetch('/current-domain');
+      const data = await res.json();
+      const url = data.url;
+
+      document.getElementById('domain').innerText = url ? url : 'No stream yet';
+
+      if (!url) return;
+
+      // If it's RTSP, show hint to use VLC
+      if (url.startsWith('rtsp://')) {
+        document.getElementById('domain').innerHTML = 
+          "📡 RTSP Stream available: <br><b>" + url + "</b><br><br>" +
+          "Use <b>VLC</b> or <b>OBS</b> to watch directly.";
+      } else {
+        // Cloudflare or Ngrok HTTPS
+        document.getElementById('domain').innerHTML = 
+          "🌍 Tunnel active: <b>" + url + "</b>";
+      }
+    }
+
+    setInterval(loadStream, 5000);
+    loadStream();
+  </script>
+</body>
+</html>
   `);
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ Media server running on http://0.0.0.0:${PORT}`);
+// ------------------------------------------------------
+// 🧠 Return current domain for frontend
+// ------------------------------------------------------
+app.get("/current-domain", (req, res) => {
+  res.json({ url: currentDomain });
 });
+
+// ------------------------------------------------------
+app.listen(PORT, "0.0.0.0", () =>
+  console.log(`✅ Media server running on http://0.0.0.0:${PORT}`)
+);
