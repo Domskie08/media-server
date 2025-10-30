@@ -50,9 +50,9 @@ def send_domain_to_laptop(domain):
 # -------------------------------
 def generate_frames():
     cap = cv2.VideoCapture(CAM_ID)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    cap.set(cv2.CAP_PROP_FPS, 15)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 800)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 600)
+    cap.set(cv2.CAP_PROP_FPS, 30)
 
     if not cap.isOpened():
         raise RuntimeError("❌ Cannot open camera")
