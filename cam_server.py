@@ -1,7 +1,6 @@
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, send_from_directory
 import subprocess, threading, requests, socket, time, os, re
 from pyngrok import ngrok
-import requests
 
 app = Flask(__name__)
 
@@ -31,13 +30,13 @@ def start_hls_stream():
     ffmpeg_cmd = [
         "ffmpeg",
         "-f", "v4l2",
-        "-framerate", "15",
-        "-video_size", "800x600",
+        "-framerate", "10",          # lower framerate for slow internet
+        "-video_size", "640x480",    # lower resolution for smoothness
         "-i", CAM_DEVICE,
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-tune", "zerolatency",
-        "-b:v", "4M",
+        "-b:v", "1M",
         "-f", "hls",
         "-hls_time", "2",
         "-hls_list_size", "3",
@@ -47,11 +46,25 @@ def start_hls_stream():
 
     subprocess.Popen(ffmpeg_cmd)
 
-@app.route('/video_feed')
-def video_feed():
-    if os.path.exists(HLS_INDEX):
-        return Response(open(HLS_INDEX, 'rb'), mimetype='application/vnd.apple.mpegurl')
-    return "HLS feed not ready", 404
+@app.route('/')
+def index():
+    """Simple HTML player"""
+    return '''
+    <html>
+    <head><title>Raspberry Pi Camera Stream</title></head>
+    <body style="background:#000; text-align:center; color:white;">
+        <h3>📺 Live Camera Stream</h3>
+        <video width="640" height="480" controls autoplay muted>
+            <source src="/hls/index.m3u8" type="application/vnd.apple.mpegurl">
+            Your browser does not support HLS playback.
+        </video>
+    </body>
+    </html>
+    '''
+
+@app.route('/hls/<path:filename>')
+def serve_hls(filename):
+    return send_from_directory(HLS_FOLDER, filename)
 
 @app.route('/status')
 def status():
@@ -84,12 +97,10 @@ def send_domain_to_laptop(domain):
     print("❌ Could not reach any laptop host.")
 
 def start_ngrok():
-    print("🚀 Starting Ngrok tunnel for 172.27.* IP...")
-    public_url = ngrok.connect(PORT, "http")
+    print("🚀 Starting Ngrok tunnel...")
+    public_url = ngrok.connect(PORT, "http").public_url
     print(f"🌍 Ngrok URL: {public_url}")
-
-    # Send the string URL (not the object) to the laptop
-    send_domain_to_laptop(str(public_url))
+    send_domain_to_laptop(public_url)
 
 def start_cloudflare():
     print("🌩️ Starting Cloudflare tunnel...")
