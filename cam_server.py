@@ -1,5 +1,5 @@
-from flask import Flask, Response, jsonify, send_from_directory
-import subprocess, threading, requests, socket, time, os, re
+from flask import Flask, Response, jsonify
+import subprocess, threading, requests, socket, time, os, re, signal
 from pyngrok import ngrok
 
 app = Flask(__name__)
@@ -21,22 +21,44 @@ HLS_INDEX = f"{HLS_FOLDER}/index.m3u8"
 CAM_DEVICE = "/dev/video0"
 
 # -----------------------
+# Utility: Kill old processes
+# -----------------------
+def cleanup_ffmpeg_and_camera():
+    print("🧹 Cleaning up old FFmpeg processes and camera locks...")
+
+    # Kill any running FFmpeg instances
+    try:
+        subprocess.run(["sudo", "pkill", "-f", "ffmpeg"], check=False)
+    except Exception as e:
+        print(f"⚠️ Error killing FFmpeg: {e}")
+
+    # Free camera device if locked
+    try:
+        subprocess.run(["sudo", "fuser", "-k", CAM_DEVICE], check=False)
+    except Exception as e:
+        print(f"⚠️ Error releasing camera: {e}")
+
+    print("✅ Cleanup complete — safe to start new stream.")
+
+
+# -----------------------
 # Video feed using HLS
 # -----------------------
 def start_hls_stream():
     os.makedirs(HLS_FOLDER, exist_ok=True)
+    cleanup_ffmpeg_and_camera()
     print("🎥 Starting HLS stream via FFmpeg (libx264)...")
 
     ffmpeg_cmd = [
         "ffmpeg",
         "-f", "v4l2",
-        "-framerate", "10",          # lower framerate for slow internet
-        "-video_size", "640x480",    # lower resolution for smoothness
+        "-framerate", "15",
+        "-video_size", "1280x720",
         "-i", CAM_DEVICE,
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-tune", "zerolatency",
-        "-b:v", "1M",
+        "-b:v", "4M",
         "-f", "hls",
         "-hls_time", "2",
         "-hls_list_size", "3",
@@ -46,25 +68,11 @@ def start_hls_stream():
 
     subprocess.Popen(ffmpeg_cmd)
 
-@app.route('/')
-def index():
-    """Simple HTML player"""
-    return '''
-    <html>
-    <head><title>Raspberry Pi Camera Stream</title></head>
-    <body style="background:#000; text-align:center; color:white;">
-        <h3>📺 Live Camera Stream</h3>
-        <video width="640" height="480" controls autoplay muted>
-            <source src="/hls/index.m3u8" type="application/vnd.apple.mpegurl">
-            Your browser does not support HLS playback.
-        </video>
-    </body>
-    </html>
-    '''
-
-@app.route('/hls/<path:filename>')
-def serve_hls(filename):
-    return send_from_directory(HLS_FOLDER, filename)
+@app.route('/video_feed')
+def video_feed():
+    if os.path.exists(HLS_INDEX):
+        return Response(open(HLS_INDEX, 'rb'), mimetype='application/vnd.apple.mpegurl')
+    return "HLS feed not ready", 404
 
 @app.route('/status')
 def status():
@@ -88,7 +96,7 @@ def send_domain_to_laptop(domain):
     for host in LAPTOP_HOSTS:
         try:
             url = f"http://{host}:3000/update-domain"
-            print(f"📡 Sending Ngrok URL to {url}")
+            print(f"📡 Sending Ngrok/Cloudflare URL to {url}")
             requests.post(url, json={"url": domain}, timeout=5)
             print(f"✅ Sent successfully to {host}")
             return
@@ -97,10 +105,10 @@ def send_domain_to_laptop(domain):
     print("❌ Could not reach any laptop host.")
 
 def start_ngrok():
-    print("🚀 Starting Ngrok tunnel...")
-    public_url = ngrok.connect(PORT, "http").public_url
+    print("🚀 Starting Ngrok tunnel for 172.27.* IP...")
+    public_url = ngrok.connect(PORT, "http")
     print(f"🌍 Ngrok URL: {public_url}")
-    send_domain_to_laptop(public_url)
+    send_domain_to_laptop(str(public_url))
 
 def start_cloudflare():
     print("🌩️ Starting Cloudflare tunnel...")
