@@ -1,10 +1,10 @@
 from flask import Flask, Response, jsonify
-import subprocess, threading, requests, socket, os, re
+import cv2, threading, subprocess, socket, requests, re, os
 from pyngrok import ngrok
 
 app = Flask(__name__)
 
-# Laptop Node.js server hosts
+# Laptop Node.js server possible hosts
 LAPTOP_HOSTS = [
     "desktop-r98pm6a.local",
     "192.168.100.15",
@@ -14,42 +14,12 @@ LAPTOP_HOSTS = [
 
 PORT = 5000
 CLOUDFLARED_PATH = "/usr/local/bin/cloudflared"
+CAM_ID = 0  # Usually /dev/video0
 
-RTSP_URL = "rtsp://localhost:8554/live"  # Local RTSP feed
-CAM_DEVICE = "/dev/video0"
-
-
-# -----------------------
-# RTSP Stream (FFmpeg)
-# -----------------------
-def start_rtsp_stream():
-    print("🎥 Starting RTSP stream (libx264, 15fps, 720p)...")
-    subprocess.Popen([
-        "ffmpeg",
-        "-f", "v4l2",
-        "-framerate", "15",
-        "-video_size", "1280x720",
-        "-i", CAM_DEVICE,
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-tune", "zerolatency",
-        "-b:v", "2M",
-        "-f", "rtsp",
-        "-rtsp_transport", "tcp",
-        RTSP_URL
-    ])
-
-
-@app.route('/status')
-def status():
-    return jsonify({"status": "ok", "stream": RTSP_URL})
-
-
-# -----------------------
-# Cloudflare Tunnel
-# -----------------------
+# -------------------------------
+# Utility functions
+# -------------------------------
 def get_local_ip():
-    import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
@@ -62,10 +32,11 @@ def get_local_ip():
 
 
 def send_domain_to_laptop(domain):
+    """Send the streaming domain to all known laptop hosts"""
     for host in LAPTOP_HOSTS:
         try:
             url = f"http://{host}:3000/update-domain"
-            print(f"📡 Sending Cloudflare URL to {url}")
+            print(f"📡 Sending stream URL to {url}")
             requests.post(url, json={"url": domain}, timeout=5)
             print(f"✅ Sent successfully to {host}")
             return
@@ -74,38 +45,92 @@ def send_domain_to_laptop(domain):
     print("❌ Could not reach any laptop host.")
 
 
-def start_cloudflare():
-    print("🌩️ Starting Cloudflare tunnel (analytics disabled)...")
+# -------------------------------
+# Video stream generator
+# -------------------------------
+def generate_frames():
+    cap = cv2.VideoCapture(CAM_ID)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, 15)
+
+    if not cap.isOpened():
+        raise RuntimeError("❌ Cannot open camera")
+
+    print("🎥 Camera streaming started...")
+
+    while True:
+        success, frame = cap.read()
+        if not success:
+            break
+        _, buffer = cv2.imencode('.jpg', frame)
+        frame_bytes = buffer.tobytes()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+
+
+@app.route('/video_feed')
+def video_feed():
+    """Live MJPEG feed"""
+    return Response(generate_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/status')
+def status():
+    return jsonify({"status": "ok", "message": "Live stream active"})
+
+
+# -------------------------------
+# Tunnel Logic (Ngrok / Cloudflare)
+# -------------------------------
+def start_cloudflare_tunnel():
+    print("🌩️ Starting Cloudflare tunnel...")
     process = subprocess.Popen(
-        [
-            CLOUDFLARED_PATH,
-            "tunnel",
-            "--no-autoupdate",
-            "--disable-analytics",        # ✅ No tracking / CORS issues
-            "--no-chunked-encoding",
-            "--url", f"http://localhost:{PORT}"
-        ],
+        [CLOUDFLARED_PATH, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{PORT}"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
 
     for line in process.stdout:
         line = line.strip()
-        print(line)
-        match = re.search(r"https://[^\s]+trycloudflare\.com", line)
-        if match:
-            domain = match.group(0)
-            print(f"🌍 Cloudflare URL: {domain}")
-            send_domain_to_laptop(domain)
-            break
+        if "trycloudflare.com" in line:
+            match = re.search(r"https://[^\s]+trycloudflare\.com", line)
+            if match:
+                url = match.group(0)
+                print(f"✅ Cloudflare URL: {url}")
+                send_domain_to_laptop(url + "/video_feed")
+                break
 
 
-# -----------------------
-# Startup
-# -----------------------
+def start_ngrok_tunnel():
+    print("🚀 Starting Ngrok tunnel...")
+    public_url = ngrok.connect(PORT, "http").public_url
+    print(f"✅ Ngrok URL: {public_url}")
+    send_domain_to_laptop(public_url + "/video_feed")
+
+
+def start_connection_mode():
+    ip = get_local_ip()
+    print(f"🌐 Detected local IP: {ip}")
+
+    if ip.startswith("172.27.44."):
+        print("🏢 Office Network Detected → Ngrok Mode")
+        start_ngrok_tunnel()
+    else:
+        print("🏠 Home Network Detected → Cloudflare Mode")
+        try:
+            start_cloudflare_tunnel()
+        except Exception as e:
+            print(f"⚠️ Cloudflare failed ({e}), using Ngrok instead")
+            start_ngrok_tunnel()
+
+
+# -------------------------------
+# Main Entry
+# -------------------------------
 if __name__ == "__main__":
-    threading.Thread(target=start_rtsp_stream, daemon=True).start()
-    threading.Thread(target=start_cloudflare, daemon=True).start()
+    threading.Thread(target=start_connection_mode, daemon=True).start()
 
-    print(f"✅ Starting Flask server on 0.0.0.0:{PORT}")
+    print(f"✅ Flask camera server running on port {PORT}")
     from waitress import serve
     serve(app, host="0.0.0.0", port=PORT)
