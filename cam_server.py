@@ -31,8 +31,8 @@ def start_hls_stream():
     ffmpeg_cmd = [
         "ffmpeg",
         "-f", "v4l2",
-        "-framerate", "30",
-        "-video_size", "1280x720",
+        "-framerate", "15",
+        "-video_size", "800x600",
         "-i", CAM_DEVICE,
         "-c:v", "libx264",
         "-preset", "ultrafast",
