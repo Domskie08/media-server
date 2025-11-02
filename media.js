@@ -1,113 +1,151 @@
-import express from "express";
-import path from "path";
-import { fileURLToPath } from "url";
-import bodyParser from "body-parser";
-import fs from "fs";
+const express = require("express");
+const axios = require("axios");
+const { exec } = require("child_process");
+const os = require("os");
 
 const app = express();
 const PORT = 3000;
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+let tunnelType = "None";
+let publicURL = "Not yet available";
 
-app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, "public")));
+// Possible Pi stream URLs
+const sources = [
+  "http://raspberrypi.local:5000/video_feed",
+  "http://192.168.137.2:5000/video_feed",
+  "http://10.0.0.8:5000/video_feed",
+  "http://172.27.44.2:5000/video_feed"
+];
 
-let currentDomain = "";
-
-// ------------------------------------------------------
-// 📡 API Endpoint - update from Raspberry Pi
-// ------------------------------------------------------
-app.post("/update-domain", (req, res) => {
-  const { url } = req.body;
-  if (!url) return res.status(400).json({ error: "Missing URL" });
-
-  currentDomain = url;
-  console.log(`✅ Received RTSP tunnel URL: ${url}`);
-
-  // Save for persistence (optional)
-  fs.writeFileSync("domain.txt", url);
-
-  res.json({ message: "Domain updated", url });
-});
-
-// ------------------------------------------------------
-// 🌐 Frontend page - show video player
-// ------------------------------------------------------
-app.get("/", (req, res) => {
-  res.send(`
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<title>RTSP Live Stream</title>
-<style>
-  body {
-    margin: 0; padding: 0;
-    background: #111; color: #fff;
-    display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    height: 100vh;
-    font-family: sans-serif;
-  }
-  video {
-    width: 80%; max-width: 900px;
-    border: 3px solid #00ffcc;
-    border-radius: 16px;
-    box-shadow: 0 0 20px #00ffaa88;
-    background: black;
-  }
-  #domain {
-    margin-top: 20px;
-    font-size: 1.1em;
-    color: #0f0;
-  }
-</style>
-</head>
-<body>
-  <h2>🎥 RTSP Live Stream</h2>
-  <video id="videoPlayer" controls autoplay muted playsinline></video>
-  <div id="domain">Waiting for stream URL...</div>
-
-  <script src="https://cdn.jsdelivr.net/npm/jsmpeg@0.2.1/jsmpeg.min.js"></script>
-  <script>
-    async function loadStream() {
-      const res = await fetch('/current-domain');
-      const data = await res.json();
-      const url = data.url;
-
-      document.getElementById('domain').innerText = url ? url : 'No stream yet';
-
-      if (!url) return;
-
-      // If it's RTSP, show hint to use VLC
-      if (url.startsWith('rtsp://')) {
-        document.getElementById('domain').innerHTML = 
-          "📡 RTSP Stream available: <br><b>" + url + "</b><br><br>" +
-          "Use <b>VLC</b> or <b>OBS</b> to watch directly.";
-      } else {
-        // Cloudflare or Ngrok HTTPS
-        document.getElementById('domain').innerHTML = 
-          "🌍 Tunnel active: <b>" + url + "</b>";
+function getLocalIPs() {
+  const nets = os.networkInterfaces();
+  const results = [];
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      if (net.family === "IPv4" && !net.internal) {
+        results.push(net.address);
       }
     }
+  }
+  return results;
+}
 
-    setInterval(loadStream, 5000);
-    loadStream();
-  </script>
-</body>
-</html>
+async function findPiStream() {
+  for (const url of sources) {
+    try {
+      await axios.get(url.replace("video_feed", "ping"), { timeout: 800 });
+      console.log(`✅ Connected to Raspberry Pi at ${url}`);
+      return url;
+    } catch {
+      console.log(`❌ ${url} not reachable`);
+    }
+  }
+  console.log("⚠️ Raspberry Pi stream not found");
+  return null;
+}
+
+// API to get status info
+app.get("/status", (req, res) => {
+  res.json({
+    localIPs: getLocalIPs(),
+    tunnel: tunnelType,
+    publicURL,
+  });
+});
+
+// Main dashboard
+app.get("/", (req, res) => {
+  res.send(`
+    <html>
+    <head>
+      <title>Media Server Dashboard</title>
+      <style>
+        body { font-family: Arial; background: #121212; color: #eee; text-align: center; padding: 40px; }
+        .card { background: #1e1e1e; padding: 25px; border-radius: 15px; display: inline-block; min-width: 400px; }
+        h1 { color: #00c3ff; }
+        button { padding: 10px 20px; border: none; border-radius: 10px; background: #00c3ff; color: white; cursor: pointer; }
+        button:hover { background: #009ed8; }
+        .info { text-align: left; margin-top: 20px; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>🎥 Media Server Dashboard</h1>
+        <div id="content">
+          <p>Loading status...</p>
+        </div>
+      </div>
+
+      <script>
+        async function loadStatus() {
+          const res = await fetch('/status');
+          const data = await res.json();
+          let html = "<div class='info'>";
+          html += "<b>Local IPs:</b><br>" + data.localIPs.join(", ") + "<br><br>";
+          html += "<b>Tunnel Type:</b> " + data.tunnel + "<br><br>";
+          html += "<b>Public URL:</b> <span id='url'>" + data.publicURL + "</span><br><br>";
+          if (data.publicURL && data.publicURL.startsWith("http")) {
+            html += "<button onclick='copyLink()'>Copy Link</button>";
+          }
+          html += "</div>";
+          document.getElementById('content').innerHTML = html;
+        }
+
+        function copyLink() {
+          const url = document.getElementById('url').innerText;
+          navigator.clipboard.writeText(url);
+          alert("Copied: " + url);
+        }
+
+        loadStatus();
+        setInterval(loadStatus, 3000);
+      </script>
+    </body>
+    </html>
   `);
 });
 
-// ------------------------------------------------------
-// 🧠 Return current domain for frontend
-// ------------------------------------------------------
-app.get("/current-domain", (req, res) => {
-  res.json({ url: currentDomain });
+// Video redirect
+app.get("/video", async (req, res) => {
+  const streamUrl = await findPiStream();
+  if (!streamUrl) return res.status(404).send("Pi not found");
+  res.redirect(streamUrl);
 });
 
-// ------------------------------------------------------
-app.listen(PORT, "0.0.0.0", () =>
-  console.log(`✅ Media server running on http://0.0.0.0:${PORT}`)
-);
+// Start server
+app.listen(PORT, async () => {
+  console.log(`💻 Media server running at http://localhost:${PORT}`);
+
+  const ips = getLocalIPs();
+  console.log("🖥️ Local IPs:", ips.join(", "));
+
+  // Detect network type
+  if (ips.some(ip => ip.startsWith("172.27.44"))) {
+    console.log("🏢 Office Network detected (172.27.44.*)");
+    tunnelType = "Ngrok";
+    console.log("🚀 Launching Ngrok...");
+    const ngrokProc = exec(`ngrok http ${PORT}`);
+
+    ngrokProc.stdout.on("data", data => {
+      const match = data.match(/https:\/\/[a-z0-9.-]+\.ngrok\.io/);
+      if (match) {
+        publicURL = match[0];
+        console.log("🌍 Public URL:", publicURL);
+      }
+    });
+
+  } else {
+    console.log("🏠 Home/Hotspot network detected");
+    tunnelType = "Cloudflare";
+    console.log("🚀 Launching Cloudflare tunnel...");
+    const cloudProc = exec(`cloudflared tunnel --url http://localhost:${PORT}`);
+
+    cloudProc.stdout.on("data", data => {
+      const match = data.match(/https:\/\/[-a-z0-9.]+\.trycloudflare\.com/);
+      if (match) {
+        publicURL = match[0];
+        console.log("🌍 Public URL:", publicURL);
+      }
+    });
+  }
+});
