@@ -7,7 +7,7 @@ import http from "http";
 const app = express();
 const PORT = 3000;
 
-// Candidate Raspberry Pi stream URLs
+// Candidate Pi URLs
 const sources = [
   "http://raspberrypi.local:5000/video_feed",
   "http://192.168.137.2:5000/video_feed",
@@ -15,7 +15,6 @@ const sources = [
   "http://172.27.44.2:5000/video_feed",
 ];
 
-// Status variables
 let tunnelType = "None";
 let publicURL = "Waiting...";
 let piStatus = "Checking...";
@@ -33,11 +32,11 @@ function getLocalIPs() {
   return results;
 }
 
-// Try to connect to the Pi stream
+// Check Pi availability
 async function checkPiStream() {
   for (const url of sources) {
     try {
-      await axios.get(url, { timeout: 1500 });
+      await axios.get(url.replace("/video_feed", "/ping"), { timeout: 1500 });
       piStatus = `✅ Connected: ${url}`;
       currentStreamURL = url;
       return url;
@@ -48,7 +47,7 @@ async function checkPiStream() {
   return null;
 }
 
-// Serve JSON status for dashboard updates
+// Dashboard JSON status
 app.get("/status", (req, res) => {
   res.json({
     localIPs: getLocalIPs(),
@@ -58,30 +57,34 @@ app.get("/status", (req, res) => {
   });
 });
 
+// Stable MJPEG proxy for dashboard /video iframe
 app.get("/video", async (req, res) => {
-  if (!currentStreamURL) {
-    await checkPiStream();
-  }
-  if (!currentStreamURL) {
-    return res.status(404).send("No Raspberry Pi stream found.");
-  }
+  if (!currentStreamURL) await checkPiStream();
+  if (!currentStreamURL) return res.status(404).send("No Raspberry Pi stream found.");
 
-  // Keep connection alive for MJPEG
+  res.writeHead(200, {
+    "Content-Type": "multipart/x-mixed-replace; boundary=frame",
+    "Cache-Control": "no-cache",
+    "Connection": "close"
+  });
+
   const streamReq = http.get(currentStreamURL, (streamRes) => {
-    res.writeHead(200, {
-      "Content-Type": "multipart/x-mixed-replace; boundary=frame"
-    });
     streamRes.on("data", (chunk) => res.write(chunk));
-    streamRes.on("end", () => res.end());
+    // Do not call res.end() — keep stream alive
   });
 
   streamReq.on("error", (err) => {
     console.error("Stream error:", err.message);
     res.end();
   });
+
+  req.on("close", () => {
+    // If browser disconnects, abort Pi request
+    streamReq.abort();
+  });
 });
 
-// Main dashboard
+// Dashboard HTML
 app.get("/", (req, res) => {
   res.send(`
     <html>
@@ -115,31 +118,25 @@ app.get("/", (req, res) => {
             html += "<b>Raspberry Pi:</b> " + data.piStatus + "<br><br>";
             html += "<b>Tunnel Type:</b> " + data.tunnel + "<br><br>";
             html += "<b>Public URL:</b> <span id='url'>" + data.publicURL + "</span><br><br>";
-            if (data.publicURL.startsWith("http")) {
-              html += "<button onclick='copyLink()'>Copy Link</button>";
-            }
+            if (data.publicURL.startsWith("http")) html += "<button onclick='copyLink()'>Copy Link</button>";
             html += "</div>";
             document.getElementById('content').innerHTML = html;
 
-            // Auto-load video when Pi connected
             if (data.piStatus.startsWith("✅")) {
               document.getElementById('videoFrame').src = "/video";
             } else {
               document.getElementById('videoFrame').src = "";
             }
-          } catch (err) {
-            console.error(err);
-          }
+          } catch (err) { console.error(err); }
         }
 
         function copyLink() {
-          const url = document.getElementById('url').innerText;
-          navigator.clipboard.writeText(url);
-          alert("Copied: " + url);
+          navigator.clipboard.writeText(document.getElementById('url').innerText);
+          alert("Copied!");
         }
 
         async function reconnect() {
-          await fetch('/status'); // refresh
+          await fetch('/status');
           document.getElementById('videoFrame').src = "/video";
         }
 
@@ -151,43 +148,30 @@ app.get("/", (req, res) => {
   `);
 });
 
-// Start server
+// Start server and launch tunnel
 app.listen(PORT, async () => {
   console.log(`💻 Media server running at http://localhost:${PORT}`);
-
   const ips = getLocalIPs();
   console.log("🖥️ Local IPs:", ips.join(", "));
 
-  // Continuous Pi checking
   setInterval(checkPiStream, 5000);
-  checkPiStream();
+  await checkPiStream();
 
-  // Tunnel detection logic
   if (ips.some(ip => ip.startsWith("172.27.44"))) {
     console.log("🏢 Office network detected (172.27.44.*)");
     tunnelType = "Ngrok";
-    console.log("🚀 Launching ngrok...");
     const ngrokProc = exec(`ngrok http ${PORT}`);
     ngrokProc.stdout.on("data", data => {
       const match = data.match(/https:\/\/[a-z0-9.-]+\.ngrok\.io/);
-      if (match) {
-        publicURL = match[0];
-        console.log("🌍 Public URL:", publicURL);
-      }
+      if (match) publicURL = match[0];
     });
   } else {
     console.log("🏠 Home/Hotspot network detected");
     tunnelType = "Cloudflare";
-    console.log("🚀 Launching Cloudflare tunnel...");
     const cloudProc = exec(`cloudflared tunnel --url http://localhost:${PORT}`);
-
-    // Detect Cloudflare link from any output line
     const detectURL = text => {
       const match = text.match(/https:\/\/[a-z0-9.-]+\.trycloudflare\.com/);
-      if (match) {
-        publicURL = match[0];
-        console.log("🌍 Public URL:", publicURL);
-      }
+      if (match) publicURL = match[0];
     };
     cloudProc.stdout.on("data", data => detectURL(data.toString()));
     cloudProc.stderr.on("data", data => detectURL(data.toString()));
