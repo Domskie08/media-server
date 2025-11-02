@@ -2,7 +2,8 @@ from flask import Flask, Response
 import cv2, socket, os
 
 app = Flask(__name__)
-camera = cv2.VideoCapture(0)  # Use your Pi cam or USB cam
+camera = cv2.VideoCapture(0, cv2.CAP_V4L2)
+camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
 # Optional: simple ping route for discovery
 @app.route("/ping")
