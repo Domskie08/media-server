@@ -19,6 +19,7 @@ let tunnelType = "None";
 let publicURL = "Waiting...";
 let piStatus = "Checking...";
 let currentStreamURL = null;
+let activeStudent = null; // track current connected student
 
 // Get local IPs
 function getLocalIPs() {
@@ -54,13 +55,22 @@ app.get("/status", (req, res) => {
     tunnel: tunnelType,
     publicURL,
     piStatus,
+    activeStudent: activeStudent ? "Occupied" : "Available",
   });
 });
 
-// Stable MJPEG proxy for dashboard /video iframe
+// Single-student MJPEG proxy
 app.get("/video", async (req, res) => {
+  const studentIP = req.ip;
+  
   if (!currentStreamURL) await checkPiStream();
   if (!currentStreamURL) return res.status(404).send("No Raspberry Pi stream found.");
+
+  // Only one student at a time
+  if (activeStudent && activeStudent !== studentIP) {
+    return res.status(403).send("🚫 Stream is currently in use by another student.");
+  }
+  activeStudent = studentIP;
 
   res.writeHead(200, {
     "Content-Type": "multipart/x-mixed-replace; boundary=frame",
@@ -70,17 +80,18 @@ app.get("/video", async (req, res) => {
 
   const streamReq = http.get(currentStreamURL, (streamRes) => {
     streamRes.on("data", (chunk) => res.write(chunk));
-    // Do not call res.end() — keep stream alive
+    // Do not end response
   });
 
   streamReq.on("error", (err) => {
     console.error("Stream error:", err.message);
     res.end();
+    activeStudent = null;
   });
 
   req.on("close", () => {
-    // If browser disconnects, abort Pi request
     streamReq.abort();
+    activeStudent = null;
   });
 });
 
@@ -118,13 +129,14 @@ app.get("/", (req, res) => {
             html += "<b>Raspberry Pi:</b> " + data.piStatus + "<br><br>";
             html += "<b>Tunnel Type:</b> " + data.tunnel + "<br><br>";
             html += "<b>Public URL:</b> <span id='url'>" + data.publicURL + "</span><br><br>";
+            html += "<b>Stream Status:</b> " + (data.activeStudent || "Available") + "<br><br>";
             if (data.publicURL.startsWith("http")) html += "<button onclick='copyLink()'>Copy Link</button>";
             html += "</div>";
             document.getElementById('content').innerHTML = html;
 
-            if (data.piStatus.startsWith("✅")) {
+            if (data.piStatus.startsWith("✅") && !data.activeStudent) {
               document.getElementById('videoFrame').src = "/video";
-            } else {
+            } else if (data.activeStudent === "Occupied") {
               document.getElementById('videoFrame').src = "";
             }
           } catch (err) { console.error(err); }
@@ -152,7 +164,7 @@ app.get("/", (req, res) => {
 app.listen(PORT, async () => {
   console.log(`💻 Media server running at http://localhost:${PORT}`);
   const ips = getLocalIPs();
-  console.log("🖥️ Local IPs:", ips.join(", "));
+  console.log("🖥️ Local IPs:", ips.join(","));
 
   setInterval(checkPiStream, 5000);
   await checkPiStream();

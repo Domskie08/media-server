@@ -2,22 +2,18 @@ from flask import Flask, Response
 import cv2, socket, os
 import logging
 
-# Silence Flask request logs
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 app = Flask(__name__)
 
-# Camera setup: reduce buffer for lower latency
 camera = cv2.VideoCapture(0, cv2.CAP_V4L2)
 camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-# Ping route for Node.js heartbeat
 @app.route("/ping")
 def ping():
     return "pong"
 
-# MJPEG streaming
 def gen_frames():
     while True:
         success, frame = camera.read()
@@ -33,7 +29,6 @@ def video_feed():
     return Response(gen_frames(),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
-# Print IPs for troubleshooting
 def print_ips():
     os.system("hostname -I > /tmp/iplist.txt")
     with open("/tmp/iplist.txt") as f:
