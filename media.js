@@ -3,25 +3,28 @@ import axios from "axios";
 import os from "os";
 import { exec } from "child_process";
 import http from "http";
+import https from "https";
+import ngrok from "ngrok";
 
 const app = express();
 const PORT = 3000;
 
-// Candidate Pi URLs
 const sources = [
   "http://raspberrypi.local:5000/video_feed",
   "http://192.168.137.2:5000/video_feed",
-  "http://10.191.254.91:5000/video_feed",
-  "http://172.27.44.2:5000/video_feed",
+  "http://10.191.254.133:5000/video_feed",
+  "http://172.27.44.149:5000/video_feed",
 ];
 
+let currentStreamURL = null;
 let tunnelType = "None";
 let publicURL = "Waiting...";
 let piStatus = "Checking...";
-let currentStreamURL = null;
-let activeStudent = null; // track current connected student
 
-// Get local IPs
+// Store all connected clients
+const clients = [];
+
+// --- Helpers ---
 function getLocalIPs() {
   const nets = os.networkInterfaces();
   const results = [];
@@ -33,7 +36,6 @@ function getLocalIPs() {
   return results;
 }
 
-// Check Pi availability
 async function checkPiStream() {
   for (const url of sources) {
     try {
@@ -48,142 +50,107 @@ async function checkPiStream() {
   return null;
 }
 
-// Dashboard JSON status
+// --- Routes ---
 app.get("/status", (req, res) => {
   res.json({
     localIPs: getLocalIPs(),
     tunnel: tunnelType,
     publicURL,
     piStatus,
-    activeStudent: activeStudent ? "Occupied" : "Available",
+    viewers: clients.length,
   });
 });
 
-// Single-student MJPEG proxy
+// MJPEG proxy with multiple viewers
 app.get("/video", async (req, res) => {
-  const studentIP = req.ip;
-  
   if (!currentStreamURL) await checkPiStream();
-  if (!currentStreamURL) return res.status(404).send("No Raspberry Pi stream found.");
+  if (!currentStreamURL) return res.status(404).send("No Pi stream found");
 
-  // Only one student at a time
-  if (activeStudent && activeStudent !== studentIP) {
-    return res.status(403).send("🚫 Stream is currently in use by another student.");
-  }
-  activeStudent = studentIP;
+  // Add client
+  clients.push(res);
 
   res.writeHead(200, {
     "Content-Type": "multipart/x-mixed-replace; boundary=frame",
     "Cache-Control": "no-cache",
-    "Connection": "close"
-  });
-
-  const streamReq = http.get(currentStreamURL, (streamRes) => {
-    streamRes.on("data", (chunk) => res.write(chunk));
-    // Do not end response
-  });
-
-  streamReq.on("error", (err) => {
-    console.error("Stream error:", err.message);
-    res.end();
-    activeStudent = null;
+    "Connection": "keep-alive",
   });
 
   req.on("close", () => {
-    streamReq.abort();
-    activeStudent = null;
+    // Remove client on disconnect
+    const idx = clients.indexOf(res);
+    if (idx !== -1) clients.splice(idx, 1);
   });
 });
 
-// Dashboard HTML
+// --- Stream fan-out from Pi ---
+async function startFanOut() {
+  if (!currentStreamURL) return;
+  const protocol = currentStreamURL.startsWith("https") ? https : http;
+  protocol.get(currentStreamURL, (streamRes) => {
+    streamRes.on("data", (chunk) => {
+      // Send same chunk to all connected clients
+      clients.forEach((client) => {
+        try {
+          client.write(chunk);
+        } catch (err) {
+          // Ignore errors for disconnected clients
+        }
+      });
+    });
+  }).on("error", (err) => {
+    console.error("Fan-out stream error:", err.message);
+  });
+}
+
+// --- Dashboard ---
 app.get("/", (req, res) => {
   res.send(`
-    <html>
-    <head>
-      <title>📡 Media Server Dashboard</title>
-      <style>
-        body { font-family: Arial; background: #121212; color: #eee; text-align: center; padding: 40px; }
-        .card { background: #1e1e1e; padding: 25px; border-radius: 15px; display: inline-block; min-width: 420px; box-shadow: 0 0 15px rgba(0,0,0,0.5); }
-        h1 { color: #00c3ff; }
-        button { padding: 10px 20px; border: none; border-radius: 10px; background: #00c3ff; color: white; cursor: pointer; }
-        button:hover { background: #009ed8; }
-        iframe { margin-top: 20px; border-radius: 10px; width: 640px; height: 480px; border: none; background: black; }
-        .info { text-align: left; margin-top: 20px; }
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <h1>🎥 Media Server Dashboard</h1>
-        <div id="content"><p>Loading...</p></div>
-        <iframe id="videoFrame" src="" allowfullscreen></iframe><br>
-        <button onclick="reconnect()">🔁 Reconnect Pi</button>
-      </div>
-
-      <script>
-        async function loadStatus() {
-          try {
-            const res = await fetch('/status');
-            const data = await res.json();
-            let html = "<div class='info'>";
-            html += "<b>Local IPs:</b><br>" + data.localIPs.join(", ") + "<br><br>";
-            html += "<b>Raspberry Pi:</b> " + data.piStatus + "<br><br>";
-            html += "<b>Tunnel Type:</b> " + data.tunnel + "<br><br>";
-            html += "<b>Public URL:</b> <span id='url'>" + data.publicURL + "</span><br><br>";
-            html += "<b>Stream Status:</b> " + (data.activeStudent || "Available") + "<br><br>";
-            if (data.publicURL.startsWith("http")) html += "<button onclick='copyLink()'>Copy Link</button>";
-            html += "</div>";
-            document.getElementById('content').innerHTML = html;
-
-            if (data.piStatus.startsWith("✅") && !data.activeStudent) {
-              document.getElementById('videoFrame').src = "/video";
-            } else if (data.activeStudent === "Occupied") {
-              document.getElementById('videoFrame').src = "";
-            }
-          } catch (err) { console.error(err); }
-        }
-
-        function copyLink() {
-          navigator.clipboard.writeText(document.getElementById('url').innerText);
-          alert("Copied!");
-        }
-
-        async function reconnect() {
-          await fetch('/status');
-          document.getElementById('videoFrame').src = "/video";
-        }
-
-        loadStatus();
-        setInterval(loadStatus, 3000);
-      </script>
-    </body>
-    </html>
+<html>
+<head><title>Media Server</title></head>
+<body>
+<h1>Media Server Dashboard</h1>
+<p>Pi Status: ${piStatus}</p>
+<p>Tunnel: ${tunnelType}</p>
+<p>Public URL: ${publicURL}</p>
+<p>Viewers: <span id="viewers">0</span></p>
+<iframe src="/video" width="640" height="480"></iframe>
+<script>
+  setInterval(async () => {
+    const data = await fetch('/status').then(r=>r.json());
+    document.getElementById('viewers').innerText = data.viewers;
+  }, 2000);
+</script>
+</body>
+</html>
   `);
 });
 
-// Start server and launch tunnel
+// --- Start server ---
 app.listen(PORT, async () => {
-  console.log(`💻 Media server running at http://localhost:${PORT}`);
-  const ips = getLocalIPs();
-  console.log("🖥️ Local IPs:", ips.join(","));
+  console.log(`Media server running at http://localhost:${PORT}`);
 
-  setInterval(checkPiStream, 5000);
   await checkPiStream();
+  setInterval(checkPiStream, 5000);
+  setInterval(startFanOut, 1000); // continuously fan out chunks
+
+  const ips = getLocalIPs();
+  console.log("Local IPs:", ips.join(","));
 
   if (ips.some(ip => ip.startsWith("172.27.44"))) {
-    console.log("🏢 Office network detected (172.27.44.*)");
     tunnelType = "Ngrok";
-    const ngrokProc = exec(`ngrok http ${PORT}`);
-    ngrokProc.stdout.on("data", data => {
-      const match = data.match(/https:\/\/[a-z0-9.-]+\.ngrok\.io/);
-      if (match) publicURL = match[0];
-    });
+    (async () => {
+      publicURL = await ngrok.connect(PORT);
+      console.log("Ngrok URL:", publicURL);
+    })();
   } else {
-    console.log("🏠 Home/Hotspot network detected");
     tunnelType = "Cloudflare";
-    const cloudProc = exec(`cloudflared tunnel --url http://localhost:${PORT}`);
+    const cloudProc = exec(`cloudflared tunnel --url http://localhost:${PORT} --loglevel info`);
     const detectURL = text => {
       const match = text.match(/https:\/\/[a-z0-9.-]+\.trycloudflare\.com/);
-      if (match) publicURL = match[0];
+      if (match) {
+        publicURL = match[0];
+        console.log("Cloudflare URL:", publicURL);
+      }
     };
     cloudProc.stdout.on("data", data => detectURL(data.toString()));
     cloudProc.stderr.on("data", data => detectURL(data.toString()));
