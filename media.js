@@ -10,7 +10,7 @@ const PORT = 3000;
 
 const sources = [
   "http://raspberrypi.local:5000/video_feed",
-  "http://192.168.137.2:5000/video_feed",
+  "http://192.168.100.18:5000/video_feed",
   "http://10.191.254.133:5000/video_feed",
   "http://172.27.44.149:5000/video_feed",
 ];
